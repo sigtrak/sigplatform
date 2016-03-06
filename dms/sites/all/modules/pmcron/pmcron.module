@@ -1,0 +1,442 @@
+<?php
+define('MAX_FILE_SIZE', variable_get('json_max_upload', 10));
+require 'dropboxapi/vendor/autoload.php';
+/**
+ * Implements hook_menu().
+ */
+function pmcron_menu() {
+	$items = array();
+	$items['pm/errors/cron'] = array(
+   'title' => 'Error submission by Cron',
+   'description' => 'Error submission through run Cron',
+   'page callback' => 'drupal_get_form',
+   'page arguments' => array('pmcron_cron'),
+   'type' => MENU_NORMAL_ITEM,
+   'access arguments' => array('Project Management: access administration pages'),
+   );
+   
+   $items['pm/errors/cronsettings'] = array(
+		'title' => 'Cron Settings',
+		'description' => 'Cron Settings',
+		'page callback' => 'drupal_get_form', //Used during form API
+		'page arguments' => array('pmcron_settingsform'),
+		'access arguments' => array('Project Management: access administration pages'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+	
+	return $items;
+}
+
+function pmcron_settingsform($form, &$form_state){
+	
+	$resTblCronSettings = pmcron_gettblcs();
+ 	
+	$form['jsonfile_del'] = array(
+		'#type' => 'radios',
+		'#title' => t('Delete Json Files'),
+		'#description' => t(''),
+		'#options' => array('Y'=>t('On'),'N'=>t('Off')),
+		//'#required' => TRUE,
+		'#default_value' => (isset($resTblCronSettings['jsonfile_del']) ? $resTblCronSettings['jsonfile_del'] : 'N'),
+		);
+		
+	$form['jsonimp_status'] = array(
+		'#type' => 'textarea',
+		'#title' => t('Import Json Files by Status'),
+		'#description' => t('Note: Enter the combination of text as comma seperated values like (FAILED, FALSE) and the flags are case sensitive'),
+		'#cols' => 30,
+		'#resizable' => TRUE,
+		'#rows' => 5,
+		//'#required' => TRUE,
+		'#value' => (isset($resTblCronSettings['jsonimp_status']) ? $resTblCronSettings['jsonimp_status'] : ''),
+		);
+	
+	$form['submit'] = array(
+	   '#type' => 'submit',
+	   '#name' => 'cronsubmitbtn',
+	   '#value' => 'Save',
+	   '#submit' =>  array('pmcron_settingsform_submit'),
+       '#validate' =>  array('pmcron_settingsform_validate'),
+	);
+	
+	/* $form['clear'] = array(
+    '#type' => 'submit',
+    '#value' => 'Reset',
+    '#validate' => array('pmcron_settingsform_clear'),
+  	 ); */
+  
+	return $form;
+}
+
+/*
+function pmcron_settingsform_clear($form, &$form_state) {
+    $form_state['rebuild'] = TRUE;
+}
+*/
+
+function pmcron_gettblcs(){
+	
+	$arrtblcs = array();
+	
+	$sqlcs = db_query('SELECT * FROM {node_cronsettings} ORDER BY ncid DESC LIMIT 0,1');
+	
+	foreach($sqlcs as $datacs) {
+       $arrtblcs['jsonfile_del'] = $datacs->jsonfile_del;
+       $arrtblcs['jsonimp_status'] = $datacs->jsonimp_status;
+       $arrtblcs['ncid'] = $datacs->ncid;
+ 	}
+ 
+	return $arrtblcs;
+}
+
+function pmcron_settingsform_validate($form, &$form_state) {
+	#echo'<pre>';print_r($form_state);die;
+	
+	if (empty($form_state['input']['jsonfile_del'] )){
+    	form_set_error('jsonfile_del', t('Delete Json Files field is required.'));
+  	}
+  	
+  	if (empty($form_state['input']['jsonimp_status'])){
+    	form_set_error('jsonimp_status', t('Import Json Files by Status field is required.'));
+  	}
+  	
+}
+
+function pmcron_settingsform_submit($form, &$form_state) {
+	global $user; 
+	#echo'<pre>';print_r($form_state);die;
+	if(isset($form_state['input']['cronsubmitbtn'])) {
+		
+		$resTblCronSettings = pmcron_gettblcs();
+		
+		if(count($resTblCronSettings) == 0 && empty($resTblCronSettings))
+		{
+			$strDelJson = $form_state['input']['jsonfile_del'];
+			$strImpJson = $form_state['input']['jsonimp_status'];
+
+			 db_insert('node_cronsettings')
+			    ->fields(array(
+			      'jsonfile_del' => $strDelJson, 
+			      'jsonimp_status' => $strImpJson,
+			      'created_date' => date('Y-m-d H:i:s'),  
+			      'created_uid' => $user->uid,         
+			    ))->execute();
+		    
+		    drupal_set_message(t('Cron Settings have been inserted successfully.'));
+	    }
+	    else if(count($resTblCronSettings) > 0 && !empty($resTblCronSettings))
+	    {
+	    	$strDelJson = $form_state['input']['jsonfile_del'];
+			$strImpJson = $form_state['input']['jsonimp_status'];
+
+			 db_update('node_cronsettings')
+			     ->fields(array(
+				    'jsonfile_del' => $strDelJson,
+				    'jsonimp_status' => $strImpJson,
+				    'updated_date' => date('Y-m-d H:i:s'),  
+			     	'updated_uid' => $user->uid,        
+				  	))
+				 ->condition('ncid', $resTblCronSettings['ncid'] , '=')
+				 ->execute();
+		    
+		    drupal_set_message(t('Cron Settings have been updated successfully.'));
+		}
+	    
+	}
+	
+}
+
+/*
+* To get importing file directory location
+*/
+function pmcron_getDirectoryFolder(){
+	$strSplitDir = explode('sites', __FILE__);
+	$dir = $strSplitDir[0].'/dropboxtmp/';
+	
+	return $dir;
+}
+
+
+/**
+ * Implements hook_cron() && To prepare upload file list
+ */
+function pmcron_cron() {
+	
+	   $resTblCronSettings = pmcron_gettblcs();
+	
+	/* ---------------------- Dropbox Api ------------------- */	
+		
+		
+		// Varada Account 
+		//Dropbox Api Initialize
+		$dropboxKey = 'm8bplqxzzevpczi';
+		$dropboxSecret = '55qyuaeanw7mscx';
+		$appName = 'Sigtrak Test';
+		//Token get from dropbox console app
+		$dropboxToken = 'qVUJS2bALUAAAAAAAAAABaX3msuUhM-N_gkI23Iq2-8HZMLliBUamc4yNxoppEGf';
+	
+		
+		/*
+		//Sankar Account 
+		//Dropbox Api Initialize
+		$dropboxKey = 'gqm3he3a18u2gdj';
+		$dropboxSecret = 'cw4f567cbcymfls';
+		$appName = 'SIGTK';
+		//Token get from dropbox console app
+		$dropboxToken = 'NCGzeBEIy4YAAAAAAAABKAaLch9CtGWUSIPJh0j_sdQwg3Q6N9f1n-z-Pvcs2E7n';
+		*/
+		
+		//Application info 
+		$appInfo = new Dropbox\AppInfo($dropboxKey, $dropboxSecret);
+		//Store csrf token
+		$csrfTokenStore = new Dropbox\ArrayEntryStore($_SESSION, 'dropbox-auth-csrf-token');
+		//Define auth details
+		$webAuth = new Dropbox\WebAuth($appInfo, $appName, 'https://creatustent.com/sigtrak', $csrfTokenStore);
+		
+		//Access dropbox account
+		$client = new Dropbox\Client($dropboxToken, $appName, 'UTF-8');
+		#echo'<pre>';print_r($client->searchFileNames('/', '.json'));die;
+		
+		//Get .json files from dropbox
+		$searchedFiles = $client->searchFileNames('/', '.json');
+
+		foreach($searchedFiles AS $filepath){
+			//File name separate from the path
+			$splitFileName = explode('/', $filepath['path']);
+			//Get end of the array element
+			$strName = end($splitFileName);
+			$arrSearchFilePath[] = $filepath['path'];
+			$arrSearchFileName[] = $strName;
+			//Store all searched files from dropbox into local folder
+			$metadatacontent = $client->getFile($filepath['path'], fopen('dropboxtmp/'.uniqid().'_@_'.$strName, "wb"));	
+		}
+		
+	/* ---------------------- Dropbox Api ------------------- */	
+		
+		$dir = pmcron_getDirectoryFolder();
+		$resDir = pmcron_getdircontents($dir);
+		
+		$fileConts = array();
+		$fileNames = array();
+		
+		if(!empty($resDir)){
+			
+			foreach($resDir as $file){
+				if(strtolower(substr($file,'-5')) === '.json'){
+					#To get the content of the file
+						$content = drupal_json_decode(file_get_contents($file));
+					#To check valid status
+						$statCheck = pmcron_status_check($content);
+			
+					if($statCheck != 'FailedStatusCheckProcess'){
+						$fileConts[] = $content;
+				    	$fileNames[] = $file;
+					}
+					
+					#Added on 16-Sep-15 for dropboxapi
+					$delReqFilesLocal[] = $file;
+					
+					unset($content);
+					unset($statCheck);
+				}	
+			}
+			
+			$fileConts = array_filter($fileConts);
+			$fileNames = array_filter($fileNames);
+		}
+		
+		if(!empty($fileConts) && !empty($fileNames)){
+			
+			//Delete all searched files from dropbox
+			if(isset($resTblCronSettings) && !empty($resTblCronSettings)){
+		   		if($resTblCronSettings['jsonfile_del'] == 'Y')
+		   		{
+					foreach($fileNames as $locfile){
+						$splitFileNameTmpDir = explode('/', $locfile);
+						$strSplitLatFileName = end($splitFileNameTmpDir);
+						$splitFileNameTmpDir = explode('_@_', $locfile);
+						$arrDirFileNameLocal[] = $splitFileNameTmpDir[1];
+					}
+				
+					$arrStrInter = array_intersect($arrDirFileNameLocal, $arrSearchFileName);
+					
+					$strFinalDelArr = array_diff($arrSearchFileName, $arrStrInter);
+					
+					foreach($strFinalDelArr as $delArrKey=>$delArrVal){
+						unset($arrSearchFilePath[$delArrKey]);
+					}
+		
+					$strFinalArrToDel = array_values($arrSearchFilePath);
+					
+					foreach($strFinalArrToDel AS $dbFilepath){
+						$client->delete($dbFilepath);
+					}
+				}		
+		  	}
+		  	#Modified on 16-Sep-15 for dropboxapi
+		  	pmcron_add_data_bulk($fileConts, $fileNames);
+		}
+		
+		//Modified on 16-Sep-15 for dropboxapi
+  		pmcron_delete($delReqFilesLocal);		
+}
+
+/**
+ * Prepare files list from the directory and to avoid empty directories
+ */
+function pmcron_getdircontents($dir, &$results = array()){
+	
+    $files = scandir($dir);
+
+    foreach($files as $key => $value){
+        $path = realpath($dir.DIRECTORY_SEPARATOR.$value);
+        if(!is_dir($path)) {
+            $results[] = $path;
+        } else if(is_dir($path) && $value != "." && $value != "..") {
+            pmcron_getdircontents($path, $results);
+            $results[] = $path;
+        }
+    }
+
+    return $results;
+}
+
+/**
+ * To remove empty directories from the base directory on spcified location(/sites/default/files/jsoncron/) 
+ */
+function pmcron_delemptysubfolders($path) {
+	
+  $strEmp = true;
+  $subDir = pmcron_getDirectoryFolder();
+  
+  
+  foreach (glob($path.DIRECTORY_SEPARATOR."*") as $file)
+  {
+     $strEmp &= is_dir($file) && pmcron_delemptysubfolders($file);
+  }
+  
+  if($path != $subDir)
+  	 $strEmp && rmdir($path);
+  
+  return true;
+   
+}
+
+/**
+ * Delete a file.
+ *
+ * @param $file_name A string containing a file path.
+ * @return TRUE for success, FALSE for failure.
+ */
+function pmcron_delete($file_name) {
+	
+  if(isset($file_name)){
+  
+  	$delDir = pmcron_getDirectoryFolder();
+  	
+	foreach($file_name as $file):
+	  if(is_file($file)) {
+	  	@chmod($file,0777);
+	    @unlink($file);
+	  }
+	  
+	endforeach;  
+  }
+  
+  pmcron_delemptysubfolders($delDir);
+  
+  return true;
+}
+
+
+/**
+ * Insert process in table node.
+ */
+function pmcron_add_data($data, &$node) {	
+  $skip_fields = array('title');
+  
+  foreach($data as $field_name => $field_value) {	
+    if (in_array($field_name, $skip_fields)) {
+      $node->{$field_name}= $field_value;
+    }
+    else {
+      $node->{$field_name}[LANGUAGE_NONE][0]['value'] = $field_value;
+    }
+  }
+  
+  node_save($node);
+}
+
+function pmcron_status_check($data){
+	
+  $arrStatus = array();
+  
+  $resTblCronSettings = pmcron_gettblcs();
+  
+  if(isset($resTblCronSettings) && !empty($resTblCronSettings)){
+  		$arrStatus = explode(',', $resTblCronSettings['jsonimp_status']);
+  		$arrStatus = array_map('trim', $arrStatus);
+  }
+  
+  $strstatuscheck = 'FailedStatusCheckProcess';
+  
+  if(isset($data) && !empty($data)){
+  	
+  	if(isset($data['pm_status']) && !empty($data['pm_status']))
+  	{
+		if(in_array($data['pm_status'], $arrStatus))
+			$strstatuscheck = $data['pm_status'];
+	}
+  	
+  }
+  
+  #echo'<pre>';print_r($arrStatus);die;
+  
+  return $strstatuscheck;
+}
+
+/** 
+ * File processing
+ */
+function pmcron_add_data_bulk($data_src, $file_name){
+  global $user;
+  $errors = array();
+  $total = 0;
+  $processed = 0;
+  $resTblCronSettings = pmcron_gettblcs();
+		
+  foreach( $data_src as $ref => $data) {
+    try {
+      $node = new stdClass();
+      $node->type = 'pmticket';
+      node_object_prepare($node);
+      $node->uid = $user->uid;
+      pmcron_add_data($data, $node);
+      if (!empty($node->nid)) {
+        $processed++;
+      }
+    } catch(Exception $e) {
+      $errors[] = $e->getMessage(). ' in file '. $file_name[$ref];
+      // Exception to be handled
+    }
+    $total++;
+  }
+  
+   #To delete error submitted files
+   /*
+   if(isset($resTblCronSettings) && !empty($resTblCronSettings)){
+   		if($resTblCronSettings['jsonfile_del'] == 'Y')
+   			pmcron_delete($file_name);
+  	}
+  	*/
+
+
+  
+  if ($total <= $processed && $total) {
+    drupal_set_message($processed.' out of '. $total. ' Errors submitted. ');
+  }
+  if (!empty($errors)) {
+    drupal_set_message(implode('<br>', $errors),'error');
+  }
+  
+}

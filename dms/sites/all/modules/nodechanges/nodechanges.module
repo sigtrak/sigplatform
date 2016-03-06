@@ -1,0 +1,1750 @@
+<?php
+
+/**
+ * Implements hook_theme().
+ */
+function nodechanges_theme() {
+  return array(
+    'nodechanges_field_formatter_view' => array(
+      'render element' => 'element',
+    ),
+    'nodechanges_field_formatter_file_view' => array(
+      'render element' => 'element',
+    ),
+    'nodechanges_comment_changes' => array(
+      'variables' => array('comment' => NULL),
+    ),
+  );
+}
+
+/**
+ * Implements hook_node_submit(). Call field_attach_submit() when comment
+ * fields exist.
+ */
+function nodechanges_node_submit($node, $form, &$form_state) {
+  if (isset($node->nodechanges_comment)) {
+    $comment = (object) $node->nodechanges_comment;
+    field_attach_submit('comment', $comment, $form['nodechanges_comment'], $form_state);
+    $node->nodechanges_comment = $comment;
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function nodechanges_node_update($node) {
+  if (!$diff_field_name = nodechanges_get_field_name('comment_node_'. $node->type)) {
+    // Skip if there is no diff field on the comment bundle for this node type
+    return;
+  }
+
+  if (!empty($node->nodechanges_skip) || empty($node->nodechanges_comment)) {
+    // Allow programmatic node_save() calls to bypass nodechanges.
+    // This is needed sometimes during migrations.
+    return;
+  }
+
+  // Invoke field-type module's hook_field_load(). This workaround is done
+  // because the $node object in this hook does not have processed fields and
+  // would be inconsistent during comparison.
+  _field_invoke_multiple('load', 'node', array($node->nid => $node));
+
+  $field_info = field_info_field($diff_field_name);
+
+  // This comes from entity_load_unchanged() so I call it unchanged.
+  $unchanged = $node->original;
+
+  $items = _nodechanges_get_changes($field_info, $node, $unchanged);
+  module_invoke_all('nodechanges_get_changes', $node, $unchanged, $items);
+
+  $comment = (object) $node->nodechanges_comment;
+  $comment->node_type = 'comment_node_' . $node->type;
+  if (($items || !nodechanges_comment_is_empty($comment)) && !isset($items['nodechanges_skip'])) {
+    if (isset($node->nodechanges_cid)) {
+      // Use the original comment object.
+      $comment = entity_load_unchanged('comment', $node->nodechanges_cid);
+    }
+    else {
+      $comment = nodechanges_comment_create($node, $comment);
+    }
+    $comment->{$diff_field_name}[LANGUAGE_NONE] = $items;
+    comment_save($comment);
+    // Copy the cid back to the node so migration code can capture it.
+    $node->nodechanges_cid = $comment->cid;
+  }
+}
+
+/**
+ * Implements hook_node_presave().
+ *
+ * If the node is configured to use nodechanges, and the node type has a
+ * 'revision comment' field configured, copy the value of that field into the
+ * core 'revision log' property.
+ */
+function nodechanges_node_presave($node) {
+  if (!$diff_field_name = nodechanges_get_field_name('comment_node_'. $node->type)) {
+    // Skip if there is no diff field on the comment bundle for this node type
+    return;
+  }
+
+  if (!empty($node->nodechanges_skip)) {
+    // Allow programmatic node_save() calls to bypass nodechanges.
+    return;
+  }
+
+  if (empty($node->nodechanges_comment)) {
+    // Initial node save, or the comment is otherwise not present.
+    return;
+  }
+
+  $comment = (object) $node->nodechanges_comment;
+  $comment->node_type = 'comment_node_' . $node->type;
+  $comment = nodechanges_comment_create($node, $comment);
+  $field_info = field_info_field($diff_field_name);
+  $revision_comment_field = $field_info['settings']['revision_comment_field'];
+  if (!empty($field_info['settings']['hide_core_revision_log']) &&
+      !empty($revision_comment_field) &&
+      !empty($comment->{$revision_comment_field}[LANGUAGE_NONE][0]['value'])) {
+    // Don't allow <a>, <p> or <br> (since the text equivalent isn't going
+    // to work in the revision log field, anyway).
+    $allowed_tags = array( 'em', 'i', 'strong', 'b', 'blockquote', 'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr');
+    $text = drupal_html_to_text($comment->{$revision_comment_field}[LANGUAGE_NONE][0]['value'], $allowed_tags);
+    if (strlen($text) > 145) {
+      $text = drupal_substr($text, 0, 140) . '...';
+    }
+    $node->log = $text;
+  }
+}
+
+/**
+ * Implements hook_field_info().
+ */
+function nodechanges_field_info() {
+  return array(
+    'nodechanges_revision_diff' => array(
+      'label' => t('Comment diff'),
+      'default_widget' => 'field_extrawidgets_hidden',
+      'default_formatter' => 'nodechanges_diff_default',
+      'settings' => array(
+        'properties' => array(),
+        'revision_comment_field' => 0,
+        'hide_core_revision_log' => FALSE,
+      ),
+    ),
+  );
+}
+
+/**
+ * Implements hook_field_extra_fields().
+ */
+function nodechanges_field_extra_fields() {
+  $extra = array();
+  $nodechanges_bundles = nodechanges_get_node_bundles();
+  foreach ($nodechanges_bundles as $bundle_name => $bundle) {
+    $extra['node'][$bundle_name] =  array(
+      'form' => array(
+        'nodechanges_comment' => array(
+          'label' => t('Revision comment'),
+          'description' => t('The reason for a given node revision, used to auto-generate a comment when the revision is saved.'),
+          'weight' => 60, // Generally, people will want this last.
+        ),
+      ),
+    );
+  }
+  return $extra;
+}
+
+/**
+ * Returns all node bundles that Nodechanges is operating on.
+ *
+ * Nodechanges is configured by adding a field to the comment bundle for a
+ * given node bundle.
+ *
+ * @return array
+ *   Nested array of node bundles that have a nodechanges field on their
+ *   comment bundle. The array is keyed by bundle name and contains bundle
+ *   structure arrays.
+ *
+ * @see field_info_bundles()
+ */
+function nodechanges_get_node_bundles() {
+  $nodechanges_bundles = array();
+  $bundles = field_info_bundles('node');
+  foreach ($bundles as $bundle_name => $bundle) {
+    if (nodechanges_get_field_name('comment_node_' . $bundle_name)) {
+      $nodechanges_bundles[$bundle_name] = $bundle;
+    }
+  }
+  return $nodechanges_bundles;
+}
+
+/**
+ * Implements hook_entity_info_alter().
+ */
+function nodechanges_entity_info_alter(&$info) {
+  $info['node']['view modes']['nodechanges'] = array(
+    'label' => t('Node changes output'),
+    'custom settings' => TRUE,
+  );
+}
+
+/**
+ * Implements hook_formatter_info().
+ */
+function nodechanges_field_formatter_info() {
+  return array(
+    'nodechanges_diff_default' => array(
+      'label' => t('Comment diff'),
+      'field types' => array(
+        'nodechanges_revision_diff',
+      ),
+      'settings' => array(
+        // How files should appear in the view.
+        'files_display_mode' => 'fieldset_all_but_new',
+      ),
+    ),
+  );
+}
+
+/**
+ * Implements hook_field_formatter_settings_form().
+ *
+ * Specifies the form elements for the nodechanges_diff_default formatter's
+ * configuration settings.
+ *
+ * @param $field
+ *   The field structure being configured.
+ * @param $instance
+ *   The instance structure being configured.
+ * @param $view_mode
+ *   The view mode being configured.
+ * @param $form
+ *   The (entire) configuration form array.
+ * @param $form_state
+ *   The form state of the (entire) configuration form.
+ *
+ * @return array
+ *   The form elements for the formatter's configuration settings.
+ */
+function nodechanges_field_formatter_settings_form($field, $instance, $view_mode, $form, &$form_state) {
+  $element = array();
+  if ($instance['display'][$view_mode]['type'] == 'nodechanges_diff_default') {
+    $display = $instance['display'][$view_mode];
+    $settings = $display['settings'];
+
+    // Files changes display mode.
+    $options = array(
+      'inline' => t('Inline in the same table with new files'),
+      'exclude' => t('Exclude from the table output'),
+      'fieldset_all' => t('Separate table inside a collapsed fieldset'),
+      'fieldset_all_but_new' => t('New files table inline and the rest separated inside a collapsed fieldset'),
+    );
+    $element['files_display_mode'] = array(
+      '#type' => 'radios',
+      '#title' => t('How to output file related changes:'),
+      '#options' => $options,
+      '#default_value' => (!empty($settings['files_display_mode'])) ? $settings['files_display_mode'] : 'fieldset_all_but_new',
+    );
+  }
+  return $element;
+}
+
+/**
+ * Implements hook_field_formatter_settings_summary().
+ *
+ * Contains the settings summary for the issue_files_summary_table formatter.
+ *
+ * @param array $field
+ *   The field structure.
+ * @param array $instance
+ *   The instance structure.
+ * @param string $view_mode
+ *   The view mode for which the settings summary is being requested.
+ *
+ * @return string
+ *   A string containing the short summary of the formatter settings.
+ */
+function nodechanges_field_formatter_settings_summary($field, $instance, $view_mode) {
+  if ($instance['display'][$view_mode]['type'] == 'nodechanges_diff_default') {
+    switch ($instance['display'][$view_mode]['settings']['files_display_mode']) {
+      case 'inline':
+        return t('Including file related changes.');
+
+      case 'exclude':
+        return t('Excluding file related changes.');
+
+      case 'fieldset_all_but_new':
+        return t('Displaying file related changes in a fieldset except new files.');
+
+      case 'fieldset_all':
+        return t('Displaying file related changes in a fieldset.');
+    }
+  }
+  return '';
+}
+
+/**
+ * Implements hook_field_settings_form().
+ */
+function nodechanges_field_settings_form($field, $instance, $has_data) {
+  $form = array();
+  $settings = $field['settings'];
+
+  $form['properties'] = array(
+    '#type' => 'checkboxes',
+    '#title' => 'Properties to include in diff',
+    '#options' => array(
+      'title' => t('Node title'),
+      'created' => t('Authored on date'),
+      'author' => t('Authored by')
+    ),
+    '#default_value' => $settings['properties'],
+  );
+
+  $options = array(0 => t('- None -'));
+  $fields = field_info_instances($instance['entity_type'], $instance['bundle']);
+  foreach ($fields as $fieldname => &$field) {
+    $info = field_info_field($fieldname);
+    if (($info['type'] == 'text_long') || ($info['type'] == 'text_with_summary')) {
+      $options[$info['field_name']] = $field['label'] . ' (' . $info['field_name'] . ')';
+    }
+  }
+  $form['revision_comment_field'] = array(
+    '#type' => 'select',
+    '#title' => t('Revision comment field'),
+    '#description' => t('Select a field where the "Revision comment" will be output. Only fields of type "Long text" or "Long text and summary" may be used.'),
+    '#options' => $options,
+    '#default_value' => $settings['revision_comment_field'],
+  );
+  $form['hide_core_revision_log'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Hide revision log property'),
+    '#description' => t('Checking this will hide the <em>Revision log message</em> property on the edit form and automatically populate its value with a trimmed copy of the <em>Revision comment</em> field.'),
+    '#default_value' => $settings['hide_core_revision_log'],
+    '#states' => array(
+      'invisible' => array(
+        ':input[name="field[settings][revision_comment_field]"]' => array('value' => 0),
+      ),
+    ),
+  );
+
+  return $form;
+}
+
+/**
+ * Implements hook_field_load().
+ */
+function nodechanges_field_load($entity_type, $entities, $field, $instances, $langcode, &$items, $age) {
+  $false_serialized = 'b:0;';
+  foreach ($entities as $id => $entity) {
+    foreach ($items[$id] as $delta => $item) {
+      foreach (array('old_value', 'new_value') as $key) {
+        $value = &$items[$id][$delta][$key];
+        // Don't try to unserialize numbers, once unserialized, the value
+        // can be all sorts of empty or the original might've been simply
+        // FALSE.
+        if (!is_numeric($value) && (($unserialize = @unserialize($value)) || $unserialize !== FALSE || $value === $false_serialized)) {
+          $value = $unserialize;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_field_update().
+ */
+function nodechanges_field_update($entity_type, $entity, $field, $instance, $langcode, &$items) {
+  foreach ($items as $delta => $item) {
+    $ref_field = field_info_field($items[$delta]['field_name']);
+    foreach (array('old_value', 'new_value') as $key) {
+      if ($ref_field['type'] == 'text_long' || $ref_field['type'] == 'text_with_summary') {
+        // No serialization for these types as they are stored as vids.
+        continue;
+      }
+      else {
+        $items[$delta][$key] = serialize($items[$delta][$key]);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_field_is_empty().
+ *
+ * Emptiness check for nodechanges fields.
+ */
+function nodechanges_field_is_empty($item, $field) {
+  return (empty($item['old_value']) && empty($item['new_value']));
+}
+
+/**
+ * Implements hook_field_formatter_view().
+ */
+function nodechanges_field_formatter_view($entity_type, $entity, $field, $comment_instance, $langcode, $items, $display) {
+  $fields = field_info_fields();
+  $settings = $display['settings'];
+  // Remove  'comment_node_'.
+  $bundle = substr($comment_instance['bundle'], 13);
+  $instances = field_info_instances('node', $bundle);
+
+  // We hard-code entity_type since we care about the node, not the comment.
+  $extra_fields = field_info_extra_fields('node', $bundle, 'form');
+
+  // Get all the node tokens once.
+  $tokens = token_build_tree('node');
+
+  // The elements to render for this field.
+  $elements = array();
+  // Changes being rendered in this call for a specific comment  entity.
+  $changes = array();
+  // Any file fields that have changes, keyed by field name.
+  $file_fields = array();
+
+  foreach ($items as $item) {
+    $field_name = $item['field_name'];
+    $change = array();
+
+    // Check if this is a property
+    if (substr($field_name, 0, 14) == 'node_property:') {
+      $property = substr($field_name, 14);
+
+      // Is there a helper?
+      $function = "_nodechanges_format_changes_$property";
+      if (function_exists($function)) {
+        $change = $function($item, $entity->nid, $bundle, $property);
+      }
+      else {
+        $change = array(
+          'old' => _nodechanges_view_property($entity->nid, $bundle, $property, $item['old_value']),
+          'new' => _nodechanges_view_property($entity->nid, $bundle, $property, $item['new_value']),
+          'new-prefix' => '»',
+        );
+      }
+      $change['label'] = check_plain($tokens["[node:$property]"]['name']);
+      // If the property has a weight as an extra field, use it. Otherwise,
+      // put node properties at the bottom of the list.
+      $change['weight'] = isset($extra_fields[$property]['weight']) ? $extra_fields[$property]['weight'] : 1000;
+    }
+    else {
+      // Ignore deleted fields which have not had data cleaned out yet.
+      if (!isset($fields[$field_name])) {
+        continue;
+      }
+
+      $type = $fields[$field_name]['type'];
+      $instance = $instances[$field_name];
+
+      // Check if the nodechanges view mode is configured to hide this field.
+      if ($instance['display']['nodechanges']['type'] == 'hidden') {
+        continue;
+      }
+
+      // Files are handled via a totally separate table.
+      if ($type == 'file') {
+        $file_fields[$field_name] = $item;
+        continue;
+      }
+
+      // Is there a helper?
+      $function = "_nodechanges_format_changes_$type";
+      if (function_exists($function)) {
+        $change = $function($item, $entity->nid, $bundle, $field_name);
+      }
+      elseif ($fields[$field_name]['cardinality'] != 1) {
+        $change = _nodechanges_view_multivalued_field($entity->nid, $bundle, $field_name, $fields[$field_name], $instance, $instance['display']['nodechanges'], $langcode, $item);
+      }
+      else {
+        $change = array(
+          'old' => _nodechanges_view_field($entity->nid, $bundle, $field_name, $item['old_value']),
+          'new' => _nodechanges_view_field($entity->nid, $bundle, $field_name, $item['new_value']),
+          'new-prefix' => '»',
+        );
+      }
+      $change['label'] = check_plain($instance['label']);
+      $change['weight'] = $instance['display']['nodechanges']['weight'];
+    }
+    $changes[$field_name] = $change;
+  }
+
+  if (!empty($changes)) {
+    // Sort all the changes by weight to get consistent ordering.
+    uasort($changes, 'drupal_sort_weight');
+
+    $elements['nodechanges'] = array(
+      '#theme' => 'nodechanges_field_formatter_view',
+      '#changes' => $changes,
+    );
+  }
+
+  if (!empty($file_fields)) {
+    $context = array(
+      'entity_type' => 'node',
+      'bundle' => $bundle,
+      'entity' => node_load($entity->nid),
+      'langcode' => $langcode,
+      'display' => $display,
+    );
+    foreach ($file_fields as $field_name => $changes) {
+      $files = nodechanges_get_file_changes($changes);
+      $has_changes = !empty($files);
+      $use_fieldset = in_array($settings['files_display_mode'], array('fieldset_all', 'fieldset_all_but_new'));
+      // Unless the field is configured to render file show/hide changes
+      // inline, remove them from the main table.
+      if ($settings['files_display_mode'] != 'inline') {
+        foreach ($files as $fid => $file) {
+          if ($settings['files_display_mode'] == 'fieldset_all_but_new') {
+            $file_statuses_to_group = array('hidden', 'shown', 'deleted');
+          }
+          else {
+            $file_statuses_to_group = array('hidden', 'shown', 'deleted', 'new');
+          }
+          if (in_array($file->file_status, $file_statuses_to_group)) {
+            // If we want them in a separate fieldset, stash the file in
+            // another array so we can render them independently.
+            if ($use_fieldset) {
+              $fieldset_files[$fid] = $files[$fid];
+            }
+            // Either way, remove the file from the main table.
+            unset($files[$fid]);
+          }
+        }
+      }
+      if (!empty($files)) {
+        $rows = _nodechanges_get_file_rows($files);
+        $element = array(
+          '#theme' => 'nodechanges_field_formatter_file_view',
+          '#field_name' => $field_name,
+          '#files' => $files,
+          '#rows' => $rows,
+          '#header' => array(t('Status'), t('File'), t('Size')),
+        );
+        drupal_alter('nodechanges_file_changes_element', $element, $context);
+      }
+      if ($use_fieldset && !empty($fieldset_files)) {
+        $rows = _nodechanges_get_file_rows($fieldset_files);
+        $element2 = array(
+          '#theme' => 'nodechanges_field_formatter_file_view',
+          '#field_name' => $field_name,
+          '#files' => $fieldset_files,
+          '#rows' => $rows,
+          '#header' => array(t('Status'), t('File'), t('Size')),
+        );
+        drupal_alter('nodechanges_file_changes_element', $element2, $context);
+        $output = array();
+        if (!empty($element)) {
+          $output['file_changes'] = $element;
+        }
+        if ($settings['files_display_mode'] == 'fieldset_all') {
+          $fieldset_title = format_plural(count($rows), '1 file was addded/hidden/shown/deleted', '@count files were added/hidden/shown/deleted');
+        }
+        else {
+          // 'fieldset_all_but_new'
+          $fieldset_title = format_plural(count($rows), '1 file was hidden/shown/deleted', '@count files were hidden/shown/deleted');
+        }
+        $output['display_changes_container'] = array(
+          '#type' => 'fieldset',
+          '#title' => $fieldset_title,
+          '#attributes' => array('class' => array('collapsed', 'collapsible')),
+          'display_changes' => $element2,
+        );
+        $element = $output;
+      }
+      if (!empty($element)) {
+        $elements[$field_name] = $element;
+      }
+      elseif ($has_changes) {
+        // TODO: This comment has file changes associated with it, but no
+        // output is being generated (due to the display settings).  We should
+        // generate a placeholder message to prevent blank comments.
+        // This only an issue for the 'exclude' display setting.
+      }
+    }
+  }
+
+  // Fields API expects to get something back where it can modify the #title
+  // related properties. So we wrap all of our elements in an outer container
+  // element that the field API can change.
+  return !empty($elements) ? array(0 => $elements) : array();
+}
+
+/**
+ * Helper to compute file field differences.
+ */
+function nodechanges_get_file_changes($item) {
+  $files = array();
+  $changed_files = array();
+  foreach (array('old_value', 'new_value') as $key) {
+    $fids[$key] = array();
+    if ($item[$key]) {
+      foreach (array_filter($item[$key]) as $data) {
+        $fids[$key][] = $data['fid'];
+        if (empty($files[$data['fid']])) {
+          $files[$key][$data['fid']] = $data;
+        }
+      }
+    }
+  }
+
+  $loaded_files = file_load_multiple(array_unique(array_merge($fids['old_value'], $fids['new_value'])));
+  foreach ($loaded_files as $fid => &$file) {
+    $source = isset($files['new_value'][$fid]) ? 'new_value' : 'old_value';
+    $file->display = isset($files[$source][$fid]['display']) ? $files[$source][$fid]['display'] : $file->status;
+    $file->description = isset($files[$source][$fid]['description']) ? $files[$source][$fid]['description'] : '';
+  }
+
+  // First, deal with files that were added or removed.
+  $tasks = array(
+    array('new_value', 'old_value', 'status' => 'new'),
+    array('old_value', 'new_value', 'status' => 'deleted'),
+  );
+  foreach ($tasks as $task) {
+    foreach (array_diff($fids[$task[0]], $fids[$task[1]]) as $fid) {
+      // Ensure the referenced file still exists on the site. If it has been
+      // deleted, then we will not display any related file changes.
+      if (!empty($loaded_files[$fid])) {
+        $changed_files[$fid] = $loaded_files[$fid];
+        $changed_files[$fid]->file_status = $task['status'];
+      }
+    }
+  }
+
+  // Now, look for files where the visibility changed.
+  foreach (array_intersect($fids['old_value'], $fids['new_value']) as $fid) {
+    if (empty($files['old_value'][$fid]['display']) && !empty($files['new_value'][$fid]['display'])) {
+      $changed_files[$fid] = $loaded_files[$fid];
+      $changed_files[$fid]->file_status = 'shown';
+    }
+    elseif (!empty($files['old_value'][$fid]['display']) && empty($files['new_value'][$fid]['display'])) {
+      $changed_files[$fid] = $loaded_files[$fid];
+      $changed_files[$fid]->file_status = 'hidden';
+    }
+  }
+
+  return $changed_files;
+}
+
+/**
+ * Get table row entries for a given array of changed files.
+ *
+ * @param array $files
+ *   Array of files that were changed in a given node revision.
+ */
+function _nodechanges_get_file_rows($files) {
+  $status_strings = array(
+    'new' => t('new'),
+    'deleted' => t('deleted'),
+    'hidden' => t('hidden'),
+    'shown' => t('shown'),
+  );
+  $rows = array();
+  foreach ($files as $fid => $file) {
+    $rows[$fid] = array(
+      'data' => array(
+        array(
+          'data' => $status_strings[$file->file_status],
+          'class' => array('nodechanges-file-status'),
+        ),
+        array(
+          'data' => theme('file_link', array('file' => $file)),
+          'class' => array('nodechanges-file-link'),
+        ),
+        array(
+          'data' => format_size($file->filesize),
+          'class' => array('nodechanges-file-size'),
+        ),
+      ),
+      'class' => array(
+        'nodechanges-file-changes',
+        'nodechanges-file-status-' . $file->file_status,
+      ),
+    );
+  }
+  return $rows;
+}
+
+/**
+ * Render the output for the nodechanges field.
+ *
+ * Generally, we assume you're going to render this as a table, so we pass in
+ * #rows as an array of rows suitable for use in theme('table'). However, if a
+ * site wants to render this in some other way, it can harvest all the
+ * relevant info out of the #rows (or look at #files directly) and do whatever
+ * necessary.
+ *
+ * @param array $variables;
+ *   Array of theme variables. The 'element' key contains the element we're
+ *   rendering. Inside that, the '#rows' property contains an array of
+ *   table rows.
+ *
+ * @see nodechanges_field_formatter_view()
+ */
+function theme_nodechanges_field_formatter_file_view($variables) {
+  $element = $variables['element'];
+  $data = array(
+    'rows' => $element['#rows'],
+  );
+  if (!empty($element['#header'])) {
+    $data['header'] = $element['#header'];
+  }
+  $data['attributes'] = array('class' => array('nodechanges-file-changes'));
+  $data['sticky'] = FALSE;
+  return theme('table', $data);
+}
+
+/**
+ * Render the output for the nodechanges field.
+ *
+ * @param array $variables;
+ *   Array of theme variables. The 'element' key contains the element we're
+ *   rendering. Inside that, the '#changes' property contains an array of
+ *   changes to display.
+ *
+ * @see nodechanges_field_formatter_view()
+ */
+function theme_nodechanges_field_formatter_view($variables) {
+  $element = $variables['element'];
+  $changes = $element['#changes'];
+  if (!empty($changes)) {
+    $rows = array();
+    foreach ($changes as $change) {
+      if (!empty($change['multivalue'])) {
+        foreach (array('old' => '-', 'new' => '+') as $type => $prefix) {
+          if (!empty($change[$type])) {
+            $values = array();
+            foreach ($change[$type] as $value) {
+              $values[] = $prefix . $value;
+            }
+            $change[$type] = implode(', ', $values);
+          }
+        }
+      }
+      $row = array('label' => array(
+        'data' => $change['label'] . ':',
+        'class' => 'nodechanges-label',
+      ));
+      if (!empty($change['changed'])) {
+        $row['changed'] = array(
+          'data' => $change['changed'],
+          'class' => 'nodechanges-changed',
+          'colspan' => 2,
+        );
+      }
+      else {
+        $row['old'] = array(
+          'data' => isset($change['old']) ? $change['old'] : '',
+          'class' => 'nodechanges-old',
+        );
+        $row['new'] = array(
+          'data' => isset($change['new']) ? $change['new'] : '',
+          'class' => 'nodechanges-new',
+        );
+      }
+      foreach (array('old', 'new') as $column) {
+        if (isset($change["$column-prefix"])) {
+          $row[$column]['data'] = $change["$column-prefix"] . ' ' . $row[$column]['data'];
+        }
+      }
+      $rows[] = $row;
+    }
+    $table_data = array(
+      'rows' => $rows,
+      'attributes' => array('class' => array('nodechanges-field-changes')),
+    );
+    return theme('table', $table_data);
+  }
+  return '';
+}
+
+/**
+ * Helper to render a multi-valued (cardinality != 1) field.
+ *
+ * @param integer $nid
+ *   The node ID of the entity we're rendering the changes of.
+ * @param string $bundle
+ *   The bundle name (node type) of the entity we're rendering changes of.
+ * @param string $field_name
+ *   The name of the field we're rendering changes of.
+ * @param array $field
+ *   The definition array for the field we're rendering.
+ * @param array $instance
+ *   The definition array for the field instance we're rendering.
+ * @param array $display
+ *   The display definition array we're trying to render the field with.
+ * @param stringn $langcode
+ *   The language code for the field.
+ * @param array $item
+ *   Nested array of changes to the field to display for a given revision.
+ *   Keyed by 'old_value' and 'new_value'.
+ *
+ * @return array
+ *   An array of changes, keyed by 'old_value' and 'new_value', where the
+ *   subvalues are the rendered markup to display.
+ */
+function _nodechanges_view_multivalued_field($nid, $bundle, $field_name, $field, $instance, $display, $langcode, $item) {
+  $change = array();
+
+  // Grab the structure of the field values so we can figure out what changed.
+  $field_columns = array_keys($field['columns']);
+
+  // See if this is a term reference field since we have to treat them a bit
+  // differently.
+  $is_term_ref = $field['type'] == 'taxonomy_term_reference' ? TRUE : FALSE;
+
+  foreach (array('old_value', 'new_value') as $key) {
+    $ids[$key] = array();
+    if ($item[$key]) {
+      foreach ($item[$key] as $data) {
+        $value_id = _nodechanges_get_field_value_id($data, $field_columns);
+        $ids[$key][] = $value_id;
+        $values[$key][$value_id] = $data;
+      }
+    }
+  }
+
+  if ($is_term_ref) {
+    $tids = array_merge($ids['old_value'], $ids['new_value']);
+    $loaded_terms = taxonomy_term_load_multiple($tids);
+  }
+  $tasks = array(
+    array('old_value', 'new_value', 'change_key' => 'old'),
+    array('new_value', 'old_value', 'change_key' => 'new'),
+  );
+
+  $node = entity_create_stub_entity('node', array($nid, NULL, $bundle));
+  foreach ($tasks as $task) {
+    $task_changes = array();
+    foreach (array_diff($ids[$task[0]], $ids[$task[1]]) as $id) {
+      if ($is_term_ref) {
+        // This renders the term, even if it's already been deleted.
+        $term =  !empty($loaded_terms[$id]) ? $loaded_terms[$id] : (object)$values[$task[0]][$id];
+        $render_item = array(
+          array(
+            'tid' => $id,
+            'taxonomy_term' => $term,
+          ),
+        );
+        // However, if the term is gone, force it to render as plain text, not
+        // a link, since the link would go to a non-existant page.
+        $term_display = $display;
+        if (empty($loaded_terms[$id])) {
+          $term_display['type'] = 'taxonomy_term_reference_plain';
+        }
+        $render = taxonomy_field_formatter_view('node', $node, $field, $instance, $langcode, $render_item, $term_display);
+      }
+      else {
+        $value = $values[$task[0]][$id];
+        $node->{$field_name}[LANGUAGE_NONE][0] = $value;
+        $render = field_view_value('node', $node, $field_name, $value, 'nodechanges');
+      }
+      if (!empty($render)) {
+        $task_changes[] = drupal_render($render);
+      }
+    }
+    if (!empty($task_changes)) {
+      $change[$task['change_key']] = $task_changes;
+    }
+  }
+  $change['multivalue'] = TRUE;
+  return $change;
+}
+
+/**
+ * Helper function to get the unique id for a given field value.
+ *
+ * @param array $field_value
+ *   The array of values for a single field delta's value.
+ * @param array $field_columns
+ *   The keys of the 'columns' subarray of the field definition array.
+ */
+function _nodechanges_get_field_value_id($field_value, $field_columns) {
+  if (count($field_columns) == 1) {
+    // If there's only a single field column, this is trivial, we just return
+    // the value of that column, and that's how we can uniquely identify this
+    // field value.
+    $column = reset($field_columns);
+    return $field_value[$column];
+  }
+  else {
+    // We can't trust that $field_value will always be exactly the same, but
+    // we can trust that all the values of the keys from the $field_columns
+    // array should be if the field wasn't actually modified.
+    $normalized_value = array();
+    foreach ($field_columns as $column) {
+      $normalized_value[$column] = $field_value[$column];
+    }
+    return md5(serialize($normalized_value));
+  }
+}
+
+/**
+ * Helper to render a single-valued (cardinality == 1) field.
+ *
+ * @param integer $nid
+ *   The node ID of the entity we're rendering the changes of.
+ * @param string $bundle
+ *   The bundle name (node type) of the entity we're rendering changes of.
+ * @param string $field_name
+ *   The name of the field we're rendering changes of.
+ * @param array $value
+ *   Array containing a single value for the field.
+ */
+function _nodechanges_view_field($nid, $bundle, $field_name, $value) {
+  $output = '';
+  if (empty($value)) {
+    return $output;
+  }
+  $node = entity_create_stub_entity('node', array($nid, NULL, $bundle));
+  $node->{$field_name}[LANGUAGE_NONE] = $value;
+  _field_invoke_multiple('load', 'node', array($node->nid => $node));
+  $field_output = array();
+  // We already know this is a single value, so we don't need to care about
+  // deltas. We can just pull off the first array entry and that will be the
+  // field value data we care about.
+  $data = reset($value);
+  $render = field_view_value('node', $node, $field_name, $data, 'nodechanges');
+  if (!empty($render)) {
+    $output = drupal_render($render);
+  }
+  return $output;
+}
+
+/**
+ * Helper to render a node property token-like.
+ */
+function _nodechanges_view_property($nid, $bundle, $property, $value) {
+  $token_name = $property;
+  // Match node property to token name
+  $property = ($property == 'author') ? 'uid' : $property;
+  $node = entity_create_stub_entity('node', array($nid, NULL, $bundle));
+  $node->$property = $value;
+  return token_replace("[node:$token_name]", array('node' => $node));
+}
+
+/**
+ * Helper for long text fields: link to the revision view.
+ */
+function _nodechanges_format_changes_text_with_summary($item, $nid) {
+  return _nodechanges_format_changes_text_long($item, $nid);
+}
+
+/**
+ * Helper for long text fields: link to the revision view.
+ */
+function _nodechanges_format_changes_text_long($item, $nid) {
+  if (module_exists('diff')) {
+    return array(
+      'changed' => l(t('View changes'), "node/$nid/revisions/view/" . $item['old_value'] . '/' . $item['new_value']),
+    );
+  }
+  else {
+    return array(
+      'old' => l(t('Old'), "node/$nid/revisions/" . $item['old_value'] . '/view'),
+      'new' => l(t('New'), "node/$nid/revisions/" . $item['new_value'] . '/view'),
+      'new-prefix' => '»',
+    );
+  }
+}
+
+/**
+ * Implement hook_form_field_ui_field_overview_form_alter().
+ */
+function nodechanges_form_field_ui_field_overview_form_alter(&$form) {
+  if ($form['#entity_type'] != 'comment' || nodechanges_get_field_name($form['#bundle'])) {
+    unset($form['fields']['_add_new_field']['type']['#options']['nodechanges_revision_diff']);
+  }
+}
+
+/**
+ * Get the node revision diff field name on a comment if it exists.
+ */
+function nodechanges_get_field_name($bundle) {
+  $instances = field_info_instances('comment', $bundle);
+  $fields = field_info_fields();
+  foreach (array_keys($instances) as $field_name) {
+    if ($fields[$field_name]['type'] == 'nodechanges_revision_diff') {
+      return $field_name;
+    }
+  }
+}
+
+/**
+ * Implements hook_form_node_type_form_alter().
+ */
+function nodechanges_form_node_type_form_alter(&$form) {
+  if (!$diff_field_name = nodechanges_get_field_name('comment_node_' . $form['#node_type']->type)) {
+    // Only operate on node types that have a diff field on their comments.
+    return;
+  }
+
+  // After checkboxes are expanded into individual elements.
+  $form['workflow']['node_options']['#after_build'][] = '_nodechanges_node_type_form_after_build';
+  $form['workflow']['node_options']['#element_validate'][] = '_nodechanges_node_type_form_validate';
+}
+
+/**
+ * Force Create new revision, which we assume is on.
+ */
+function _nodechanges_node_type_form_after_build($element) {
+  $element['revision']['#checked'] = TRUE;
+  $element['revision']['#attributes']['disabled'] = 'disabled';
+  $element['revision']['#description'] = t('Required for node changes.');
+
+  return $element;
+}
+
+/**
+ * Force Create new revision, which we assume is on.
+ */
+function _nodechanges_node_type_form_validate($element, &$form_state) {
+  form_set_value($element, array_merge($element['#value'], array('revision' => 'revision')), $form_state);
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function nodechanges_form_alter(&$form, &$form_state, $form_id) {
+  if (!empty($form['#node_edit_form'])) {
+    $node = $form_state['build_info']['args'][0];
+    if (!$diff_field_name = nodechanges_get_field_name('comment_node_' . $node->type)) {
+      // Only operate on node types that have a diff field on their comments.
+      return;
+    }
+    $field_info = field_info_field($diff_field_name);
+    if (!$field_info['settings']['revision_comment_field']) {
+      // Only operate on node types that have a revision_comment_field set.
+      return;
+    }
+
+    // We depend on having a new revision. Do not allow skipping.
+    $form['revision_information']['revision']['#access'] = FALSE;
+
+    // If the field is so configured, hide the core 'Revision log message'
+    // property. We'll copy the value from our 'Revision comment' pseudo
+    // field into the core revision log property via hook_node_presave().
+    if (!empty($field_info['settings']['hide_core_revision_log'])) {
+      $form['revision_information']['log']['#access'] = FALSE;
+      // If none of the elements in the revision_info fieldset are visible,
+      // hide the whole fieldset.
+      $hide = TRUE;
+      foreach (element_children($form['revision_information']) as $element) {
+        if (!isset($form['revision_information'][$element]['#access']) || $form['revision_information'][$element]['#access']) {
+          $hide = FALSE;
+          break;
+        }
+      }
+      if ($hide) {
+        $form['revision_information']['#access'] = FALSE;
+      }
+    }
+
+    if (empty($node->nid) || $node->comment != COMMENT_NODE_OPEN) {
+      // Only modify the form during update with opened comments, not create.
+      return;
+    }
+
+    // Note that nodechanges_node_update() has some logic where it looks in
+    // $node to harvest certain things, so we have to name this form element
+    // to avoid conflicting with any of the magic properties there.
+    $form['nodechanges_comment'] = array(
+      '#type' => 'container',
+      '#tree' => TRUE,
+      '#parents' => array('nodechanges_comment'),
+    );
+
+    // Attach comment fields.
+    $comment = new stdClass();
+    $comment->node_type = 'comment_node_' . $node->type;
+    if (user_access('post comments')) {
+      field_attach_form('comment', $comment, $form['nodechanges_comment'], $form_state, LANGUAGE_NONE);
+      $form['nodechanges_comment']['#element_validate'][] = '_nodechanges_comment_validate';
+    }
+    $form['nodechanges_comment']['node_type'] = array('#type' => 'value', '#value' => $comment->node_type);
+    $form_state['nodechanges_comment'] = $comment;
+    nodechanges_comment_not_required($form['nodechanges_comment']);
+
+    $form['actions']['submit']['#submit'][] = 'nodechanges_node_edit_form_submit';
+    $form['actions']['preview']['#submit'][] = 'nodechanges_node_preview_form_submit';
+
+    // Include file so we have the node form for AJAX, needed when form is
+    // rendered via nodechanges_block_view().
+    form_load_include($form_state, 'inc', 'node', 'node.pages');
+  }
+}
+
+/**
+ * #element_validate callback, call field_attach_form_validate() for comment
+ * fields.
+ */
+function _nodechanges_comment_validate($element, &$form_state) {
+  $pseudo_entity = (object) $form_state['values']['nodechanges_comment'];
+  field_attach_form_validate('comment', $pseudo_entity, $element, $form_state);
+}
+
+/**
+ * Submit callback function to redirect to the new comment after node edits.
+ */
+function nodechanges_node_edit_form_submit($form, &$form_state) {
+  if (isset($form_state['node']->nodechanges_cid)) {
+    $query = array();
+    // Find the current display page for this comment.
+    $page = comment_get_display_page($form_state['node']->nodechanges_cid, $form_state['node']->type);
+    if ($page > 0) {
+      $query['page'] = $page;
+    }
+    // Redirect to the newly posted comment.
+    $redirect = array('node/' . $form_state['node']->nid, array('query' => $query, 'fragment' => 'comment-' . $form_state['node']->nodechanges_cid));
+    $form_state['redirect'] = $redirect;
+  }
+}
+
+/**
+ * Submit callback for nodechanges_form_alter(), when Preview button is used.
+ */
+function nodechanges_node_preview_form_submit($form, &$form_state) {
+  // Show comment on node preview.
+  if (isset($form_state['node']->nodechanges_comment)) {
+    $comment = (object) $form_state['node']->nodechanges_comment;
+    $comment = nodechanges_comment_create($form_state['node'], $comment);
+    $comment->created = $comment->changed = REQUEST_TIME;
+    $comment->subject = '';
+    $comment->in_preview = TRUE;
+    if (!nodechanges_comment_is_empty($comment)) {
+      $comment_view = comment_view($comment, $form_state['node'], 'full');
+      $comment_view['#prefix'] = '<h3>' . t('Preview comment') . '</h3>';
+      $form_state['node_preview'] .= drupal_render($comment_view);
+    }
+  }
+}
+
+/**
+ * Implements hook_extended_file_field_metadata_types().
+ *
+ * Defines an additional 'Comment ID' metadata property for the extended file
+ * field formatter.
+ */
+function nodechanges_extended_file_field_metadata_types() {
+  return array(
+    'cid' => array(
+      'title' => t('Comment'),
+      'sort' => 'numeric',
+      'formatter' => 'nodechanges_generate_file_jumplink',
+    ),
+  );
+}
+
+/**
+ * Implements hook_extended_file_field_items_alter().
+ *
+ * Adds the 'Comment Id' metadata to the file $items array within fields using
+ * the extended_file_field field formatter.
+ *
+ * @param array $items
+ *   The array of file items from the field, keyed by file ID (fid).
+ * @param array $context
+ *   Associative array of context for the table of files being altered, with
+ *   the following keys:
+ *   - field: The field definition array.
+ *   - instance: The field instance definition array.
+ *   - entity: An object representing the entity the file field is attached to.
+ *   - entity_type: String with the type of entity the field is attached to.
+ *   - langcode: The language associated with $items.
+ *   - display: The display settings to use, as found in the 'display' entry of
+ *     the instance definition. Notable keys include the name of the formatter
+ *     (in 'type') and the array of formatter settings (in 'settings').
+ *
+ *  @see drupal_alter()
+ */
+function nodechanges_extended_file_field_items_alter(&$items, &$context) {
+  if (!empty($items)) {
+    // Add a 'Comment ID' property to each item in the $items array.
+    $file_cids = nodechanges_get_changed_cids_keyed($context['entity'], $context['field']['field_name'], 'fid');
+    foreach ($items as $key => $value) {
+      // Add the comment id associated with each file to the $items array.
+      // If no comment id is found for a given file, set it to '0'.
+      $items[$key]['cid'] = isset($file_cids[$value['fid']]) ? $file_cids[$value['fid']] : 0;
+    }
+  }
+}
+
+/**
+ * Implements hook_extended_file_field_widget_items_alter().
+ *
+ * Adds the 'Comment Id' metadata to the file $items array on file field
+ * widgets configured to do so using the additional settings provided by the
+ * extended_file_field module.
+ *
+ * @param array $items
+ *   The array of file items from the field, keyed by file ID (fid).
+ * @param array $context
+ *   Associative array of context for the table of files being altered, with
+ *   the following keys:
+ *   - field: The field definition array.
+ *   - instance: The field instance definition array.
+ *   - entity: An object representing the entity the file field is attached to.
+ *   - entity_type: String with the type of entity the field is attached to.
+ *   - langcode: The language associated with $items.
+ *   - display: The display settings to use, as found in the 'widget' portion
+ *     of the instance definition.
+ *
+ * @see drupal_alter()
+ */
+function nodechanges_extended_file_field_widget_items_alter(&$items, &$context) {
+  nodechanges_extended_file_field_items_alter($items, $context);
+}
+
+/**
+ * Implements hook_field_formatter_settings_form_alter().
+ *
+ * This function is only relevant for integration with the extended_file_field
+ * field formatter, and is only called if the field_formatter_settings module
+ * is also installed, unless http://drupal.org/node/945524 makes it into D7.
+ * Note: the parameters for this when invoked by the field_formatter_settings
+ * D7 contrib module are different from the hook as provided by D8 core.
+ *
+ * We want to ensure our Comment ID jumplinks are rendered as the first table
+ * column. We could have invoked the alter() hook on the full table structure,
+ * but this can conveniently be avoided by re-arranging the formatter's
+ * $settings_form['columns']['#options'] array, which defines the default
+ * column order.
+ *
+ * @param array $settings_form
+ *   Setting form array as returned by hook_field_formatter_settings_form().
+ * @param array $context
+ *   An associative array with the following elements:
+ *   - 'module': The module that contains the definition of this formatter.
+ *   - 'formatter': The formatter type description array.
+ *   - 'field': The field structure being configured.
+ *   - 'instance': The instance structure being configured.
+ *   - 'view_mode': The view mode being configured.
+ *   - 'form': The (entire) configuration form array.
+ */
+function nodechanges_field_formatter_settings_form_alter(&$settings_form, $context) {
+  if ($context['module'] == 'extended_file_field') {
+    $settings_form['columns']['#options'] = array_merge(array('cid' => t('Comment ID')), $settings_form['columns']['#options']);
+  }
+}
+
+/**
+ * Generates a comment jumplink for a file item's 'cid' property.
+ *
+ * This renders the custom 'cid' property provided by this module to the
+ * extended_file_field formatter and widget. Generates formatted 'Comment ID'
+ * links for a file, based on the 'cid' metadata property.
+ *
+ * @param array $file
+ *   The file properties array, as provided by the extended_file_field module,
+ *   containing all default and external metadata (i.e. after all invocations
+ *   of hook_extended_file_field_items_alter()). Must contain a 'cid' property
+ *   which contains the comment ID which that file is related to.
+ * @param array $context
+ *   Associative array of context for the table of files being altered, with
+ *   the following keys:
+ *   - field: The field definition array.
+ *   - instance: The field instance definition array.
+ *   - entity: An object representing the entity the file field is attached to.
+ *   - entity_type: String with the type of entity the field is attached to.
+ *   - langcode: The language associated with $items.
+ *   - display: The display settings to use, as found in the 'display' entry of
+ *     the instance definition. Notable keys include the name of the formatter
+ *     (in 'type') and the array of formatter settings (in 'settings').
+ *
+ * @return string
+ *   The HTML string for a "jumplink" to the place where a given file was
+ *   attached to an entity. Generally, this will link to the comment that was
+ *   auto-generated when a file was attached, although for files attached to
+ *   the initial revision of a node this will just link to the node body.
+ */
+function nodechanges_generate_file_jumplink($file, $context) {
+  // Retrieve the node
+  $entity = $context['entity'];
+
+  // While the entity is being created, we know any files are attached
+  // directly to the entity and we can't generate any links. Also, if a file
+  // has no associated comment, then we skip creating a link.
+  if (empty($entity->nid) || empty($file['cid'])) {
+    return '';
+  }
+  $comment = comment_load($file['cid']);
+  $thread = nodechanges_get_comment_thread_id($comment);
+  return l('#' . $thread, 'node/' . $entity->nid, array('fragment' => 'comment-' . $file['cid']));
+}
+
+/**
+ * Return the thread identifier for a given comment.
+ *
+ * @param stdObj $comment
+ *   A fully-loaded comment entity object, as returned by comment_load().
+ *
+ * @return string
+ *   The sequential thread ID for the comment in a given node. This is the
+ *   human-readable sequential comment number, starting from 1, not the
+ *   site-wide unique comment ID.
+ */
+function nodechanges_get_comment_thread_id($comment) {
+  return implode('.', array_map('vancode2int', explode('.', substr($comment->thread, 0, -1))));
+}
+
+/**
+ * Return a list of comment ids associated with a given node.
+ *
+ * @param stdClass $node
+ *   The fully-loaded node object.
+ * @param string $order
+ *   The sort order for the returned comment ids.  Defaults to 'ASC'.
+ *
+ * @return array
+ *   An array of comment ids associated with the node, sorted by $order.
+ */
+function nodechanges_get_all_cids($node, $order = 'ASC') {
+  $cids = &drupal_static(__FUNCTION__);
+  $nid = $node->nid;
+  if (!isset($cids[$nid])) {
+    $query = db_select('comment', 'c');
+    $query->addField('c', 'cid');
+    $query->condition('c.nid', $nid)
+      ->addTag('node_access')
+      ->addTag('comment_filter')
+      ->orderBy('c.cid', $order);
+    $cids[$nid] = $query->execute()->fetchCol();
+  }
+  return $cids[$nid];
+}
+
+/**
+ * Return all comment ids where nodechanges recorded a change to a given field.
+ *
+ * Performs an EntityFieldQuery lookup on the nodechanges field for a node,
+ * returning an array of comment IDs representing each comment which contains
+ * a recorded change to the desired node field.
+ *
+ * @param stdClass $node
+ *   The fully-loaded node object.
+ * @param array $field_names
+ *   An array of field names on the node for which we are looking for
+ *   nodechanges field entries. The presence of any of these field names within
+ *   the nodechanges field associated with a given comment indicates that the
+ *   node field changed during the node revision which generated that comment.
+ *
+ * @return array
+ *   An array of comment ids associated with each node revision where the given
+ *   node field changed.
+ */
+function nodechanges_get_changed_cids($node, $field_names) {
+  // Retrieve all comment ids
+  $cids = nodechanges_get_all_cids($node);
+
+  // Determine the nodechanges field name
+  $nodechanges_fieldname = nodechanges_get_field_name('comment_node_' . $node->type);
+
+  // Get all cids which have a change to the supplied node field
+  if (!empty($cids)) {
+    // Load each comment which contains a change to the given file field.
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'comment')
+      ->entityCondition('bundle', 'comment_node_' . $node->type)
+      ->entityCondition('entity_id', $cids, 'IN')
+      ->propertyCondition('nid', $node->nid)
+      ->propertyCondition('status', 1)
+      ->fieldCondition($nodechanges_fieldname, 'field_name', $field_names, 'IN')
+      ->propertyOrderBy('cid', 'ASC');
+    $result = $query->execute();
+  }
+
+  $cids = (isset($result['comment'])) ? array_keys($result['comment']) : array();
+
+  return $cids;
+}
+
+/**
+ * Assemble an array of $key => 'cid' relationships for the given field.
+ *
+ * This finds all the comments on the node where a nodechanges field recorded
+ * a change to the given node field, so that we can find the comment that was
+ * auto-generated each time that particular node field was modified.
+ *
+ * @param stdClass $node
+ *   The fully-loaded node object to inspect for files.
+ * @param string $field_name
+ *   The name of the node field that we're trying to populate comment IDs for.
+ * @param string $key
+ *   The name of a property from the node field, the value of which will be
+ *   used as the key for the resulting array.
+ *
+ * @return array
+ *   An array of comment IDs representing comments which were auto-generated
+ *   each time that the node field being inspected was modified, keyed by the
+ *   node field property defined by $key.
+ */
+function nodechanges_get_changed_cids_keyed($node, $field_name, $key) {
+
+  if (empty($node->nid)) {
+    // While the node is being created, there are definitely no comments so
+    // bail early.
+    return array();
+  }
+
+  $change_cids = &drupal_static(__FUNCTION__);
+  $cache_id = $node->nid . ':' . $field_name;
+
+  if (!isset($change_cids[$cache_id])) {
+    // Initialize a record in our static cache in case we have to bail.
+    $change_cids[$cache_id] = array();
+
+    // First, we need to find the nodechanges field on this node type's
+    // comment bundle.
+    $nodechanges_fieldname = nodechanges_get_field_name('comment_node_' . $node->type);
+
+    if (!empty($nodechanges_fieldname)) {
+      // Obtain list of cids for this node which contain a change to the field.
+      $cids = nodechanges_get_changed_cids($node, array($field_name));
+
+      // Load the values of the changed fields so that we can extract our $key.
+      if (!empty($cids)) {
+        // Load the actual comment objects we are concerned with
+        $comments = (!empty($cids)) ? entity_load('comment', $cids) : array();
+        $cids = array();
+        foreach ($comments as $comment) {
+          $language = !empty($comment->language) ? $comment->language : 'und';
+          foreach ($comment->{$nodechanges_fieldname}[$language] as $change) {
+            if ($change['field_name'] == $field_name) {
+              // Create array of 'id' => 'cid' for all file values which
+              // existed after this particular change.
+              $added = array();
+              if (!empty($change['new_value'])) {
+                foreach ($change['new_value'] as $item) {
+                  $added[$item[$key]] = $comment->cid;
+                }
+              }
+
+              // Remove any array values for file entries which existed before
+              // this particular change.
+              if (!empty($change['old_value'])) {
+                foreach ($change['old_value'] as $item) {
+                  unset($added[$item[$key]]);
+                }
+              }
+              $cids = $cids + $added;
+            }
+          }
+          $change_cids[$cache_id] = $cids;
+        }
+      }
+    }
+  }
+
+  return $change_cids[$cache_id];
+}
+
+/**
+ * Render the changes recorded in a comment as plain text.
+ *
+ * @param array $variables
+ *   Array of theme variables that must include 'comment', the fully-loaded
+ *   comment object to render changes from.
+ *
+ * @return string
+ *   A plain-text representation of the changes in that comment.
+ */
+function theme_nodechanges_comment_changes($variables) {
+  $comment = $variables['comment'];
+  $output = '';
+
+  // Get the raw (unformatted) values of whatever changed with this comment.
+  $nodechanges_field = nodechanges_get_field_name($comment->node_type);
+  $instance = field_info_instance('comment', $nodechanges_field, $comment->node_type);
+  $field = field_info_field_by_id($nodechanges_field);
+  // TODO: $langcode sucks.
+  $langcode = LANGUAGE_NONE;
+  $field_view = nodechanges_field_formatter_view('comment', $comment, $field, $instance, $langcode, $comment->{$nodechanges_field}[$langcode], 'default');
+
+  $changes = !empty($field_view[0]['nodechanges']['#changes']) ? $field_view[0]['nodechanges']['#changes'] : array();
+
+  // If we have no changes, bail.
+  if (empty($changes)) {
+    return $output;
+  }
+
+  // Walk through all the changed fields and find the length of the longest
+  // label so we can pad everything accordingly to let the values line up
+  // vertically.
+  $max_label_length = 0;
+  foreach ($changes as $key => $change) {
+    if (empty($change['multivalue'])) {
+      $label_length = strlen($change['label']);
+      if ($label_length > $max_label_length) {
+        $max_label_length = $label_length;
+      }
+    }
+  }
+
+  // Now, render the actual changes.
+  foreach ($changes as $key => $change) {
+    if (!empty($change['multivalue'])) {
+      // We don't need padding since the values are on a new line.
+      $output .= ' ' . $change['label'] . ":\n";
+      foreach (array('old' => '-', 'new' => '+') as $type => $prefix) {
+        if (!empty($change[$type])) {
+          foreach ($change[$type] as $value) {
+            $output .= ' ' . $prefix . ' ' . $value;
+          }
+        }
+      }
+    }
+    else {
+      $label = str_pad($change['label'] . ':', $max_label_length + 2);
+      if (!empty($change['old'])) {
+        $output .= '- ' . $label . $change['old'] . "\n";
+      }
+      if (!empty($change['new'])) {
+        $output .= '+ ' . $label . $change['new'] . "\n";
+      }
+    }
+  }
+  return $output;
+}
+
+/**
+ * Implements hook_field_create_instance().
+ */
+function nodechanges_field_create_instance($instance) {
+  $field_info = field_info_field($instance['field_name']);
+  if ($field_info['type'] == 'nodechanges_revision_diff') {
+    $node_options = variable_get('node_options_' . substr($instance['bundle'], 13), array('status', 'promote'));
+    if (!in_array('revision', $node_options)) {
+      $node_options[] = 'revision';
+      variable_set('node_options_' . substr($instance['bundle'], 13), $node_options);
+    }
+  }
+}
+
+/**
+ * Implements hook_field_purge_instance()
+ */
+function nodechanges_field_purge_instance($instance) {
+  $bundles = nodechanges_get_node_bundles();
+  if (array_key_exists($instance['bundle'], $bundles)) {
+    $revision_field_name = nodechanges_get_field_name('comment_node_' . $instance['bundle']);
+    $revision_field_info = field_info_field($revision_field_name);
+    db_delete(_field_sql_storage_tablename($revision_field_info))
+      ->condition('bundle', 'comment_node_' . $instance['bundle'])
+      ->condition($revision_field_name . '_field_name', $instance['field_name'])
+      ->execute();
+    db_delete(_field_sql_storage_revision_tablename($revision_field_info))
+      ->condition('bundle', 'comment_node_' . $instance['bundle'])
+      ->condition($revision_field_name . '_field_name', $instance['field_name'])
+      ->execute();
+  }
+}
+
+/**
+ * Helper function. Get differences between two nodes.
+ */
+function _nodechanges_get_changes($field_info, $node, $unchanged) {
+  $items = array();
+
+  foreach ($field_info['settings']['properties'] as $property => $property_name) {
+    $token_name = $property;
+    // Match node property to token name
+    $property = ($property == 'author') ? 'uid' : $property;
+    $same = $node->$property == $unchanged->$property;
+    if (!$same) {
+      $item = array(
+        'field_name' => "node_property:$token_name",
+        'nid' => $node->nid,
+        'vid' => $node->vid,
+      );
+      $item['old_value'] = $unchanged->$property;
+      $item['new_value'] = $node->$property;
+      $items[] = $item;
+    }
+  }
+
+  foreach (field_info_instances('node', $node->type) as $field_name => $instance) {
+    $field = field_info_field($field_name);
+    $field_language = field_language('node', $node, $field_name);
+    $old_value = empty($unchanged->{$field_name}[$field_language]) ? NULL : $unchanged->{$field_name}[$field_language];
+    if (!empty($old_value) && $field['type'] == 'taxonomy_term_reference') {
+      // Thanks to core being inconsistent, $node->original only contains
+      // taxonomy term IDs (tids) for term reference fields, whereas $node
+      // itself contains everything (tid, name, description, etc). We need to
+      // store the full data as part of the nodechanges field here, since when
+      // it comes time to display, if a term has since been removed from the
+      // system, we can no longer load it at that point. So, we load
+      // everything here to make sure we've got it all for now and forever.
+      $tids = array();
+      foreach ($old_value as $key => $value) {
+        if (empty($value['tid'])) {
+          unset($old_value[$key]);
+        }
+        else {
+          $tids[] = $value['tid'];
+        }
+      }
+      if (!empty($tids)) {
+        $terms = taxonomy_term_load_multiple($tids);
+        foreach ($old_value as $key => $value) {
+          $tid = $value['tid'];
+          if (!empty($terms[$tid])) {
+            $old_value[$key] = (array)$terms[$tid];
+          }
+        }
+      }
+    }
+    $new_value = empty($node->{$field_name}[$field_language]) ? NULL : $node->{$field_name}[$field_language];
+    $same = empty($old_value) == empty($new_value);
+    if ($same && !empty($old_value)) {
+      $old_deltas = array_keys($old_value);
+      $new_deltas = array_keys($new_value);
+      $same = !array_diff($old_deltas, $new_deltas) && !array_diff($new_deltas, $old_deltas);
+      if ($same) {
+        $columns = array_keys($field['columns']);
+        foreach ($old_value as $delta => $old_items) {
+          foreach ($columns as $column) {
+            $set = isset($old_items[$column]);
+            if (($set != isset($new_value[$delta][$column])) || ($set && $old_items[$column] != $new_value[$delta][$column])) {
+              $same = FALSE;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (!$same) {
+      $item = array(
+        'field_name' => $field_name,
+        'nid' => $node->nid,
+        'vid' => $node->vid,
+      );
+      if ($field['type'] == 'text_long' || $field['type'] == 'text_with_summary') {
+        $item['old_value'] = $unchanged->vid;
+        $item['new_value'] = $node->vid;
+      }
+      else {
+        $item['old_value'] = serialize($old_value);
+        $item['new_value'] = serialize($new_value);
+      }
+      $items[] = $item;
+    }
+  }
+
+  return $items;
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function nodechanges_block_info() {
+  return array(
+    'nodechanges_edit' => array(
+      'info' => t('Node changes: Comment & edit form'),
+      'cache' => DRUPAL_NO_CACHE,
+      // Do not show on node/*/edit, node/*/revisions, etc.
+      'visibility' => BLOCK_VISIBILITY_NOTLISTED,
+      'pages' => 'node/*/*',
+    ),
+  );
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function nodechanges_block_view($delta = '', $block = NULL) {
+  if ($delta === 'nodechanges_edit') {
+    $node = menu_get_object();
+    if (!empty($node) && nodechanges_get_field_name('comment_node_'. $node->type) && node_access('update', $node) && $node->comment == COMMENT_NODE_OPEN) {
+      $node->nodechanges_in_block = TRUE;
+      module_load_include('inc', 'node', 'node.pages');
+      // Reset list module's cache of allowed_values, in case the project has
+      // changed.
+      drupal_static_reset('list_allowed_values');
+      return array(
+        'subject' => t('Add new comment'),
+        'content' => drupal_get_form($node->type . '_node_form', $node),
+      );
+    }
+  }
+}
+
+/**
+ * Check if the comment fields are empty.
+ *
+ * @param $comment
+ *
+ * @return bool
+ */
+function nodechanges_comment_is_empty($comment) {
+  $instances = field_info_instances('comment', $comment->node_type);
+  foreach ($instances as $field_name => $instance) {
+    $field = field_info_field($field_name);
+    $items = field_get_items('comment', $comment, $field_name, LANGUAGE_NONE);
+    $function = $field['module'] . '_field_is_empty';
+    if (is_array($items)) {
+      foreach ($items as $item) {
+        if (!$function($item, $field)) {
+          return FALSE;
+        }
+      }
+    }
+  }
+  return TRUE;
+}
+
+/**
+ * @param      $node
+ * @param null $comment
+ *
+ * @return null|stdClass
+ */
+function nodechanges_comment_create($node, $comment = NULL) {
+  $comment = is_object($comment) ? $comment : new stdClass();
+  $comment->node_type = 'comment_node_'. $node->type;
+  $comment->nid = $node->nid;
+  // Allow passing pid and cid through. This is needed during migrations.
+  $comment->pid = isset($node->nodechanges_pid) ? $node->nodechanges_pid : NULL;
+  $comment->cid = isset($node->nodechanges_cid) ? $node->nodechanges_cid : NULL;
+  if (isset($node->nodechanges_uid)) {
+    $comment->uid = $node->nodechanges_uid;
+    $user_data = user_load($node->nodechanges_uid);
+  }
+  else {
+    $comment->uid = $GLOBALS['user']->uid;
+    $user_data = $GLOBALS['user'];
+  }
+  // Ensure the comment has a valid 'status' state, if not already set.
+  if (!isset($comment->status)) {
+    $publish_user = user_load($comment->uid);
+    if (user_access('skip comment approval', $publish_user)) {
+      $comment->status = 1;
+    }
+  }
+  // Allow passing arbitrary attributes to the comment object before
+  // saving.
+  if (!empty($node->nodechanges_comment_attributes)) {
+    foreach ($node->nodechanges_comment_attributes as $attr => $value) {
+      $comment->{$attr} = $value;
+    }
+  }
+  // Fill comment with user data.
+  $comment->name = isset($user_data->name) ? check_plain($user_data->name) : '';
+  $comment->picture = isset($user_data->picture) ? $user_data->picture : '';
+  $comment->signature = isset($user_data->signature) ? $user_data->signature : '';
+  $comment->signature_format = isset($user_data->signature_format) ? $user_data->signature_format : '';
+
+  return $comment;
+}
+
+/**
+ * Recursively set required attribute FALSE on all elements.
+ *
+ * @param $elements
+ */
+function nodechanges_comment_not_required(&$elements) {
+  if (isset($elements['#required'])) {
+    $elements['#required'] = FALSE;
+  }
+
+  foreach (element_children($elements) as $child) {
+    nodechanges_comment_not_required($elements[$child]);
+  }
+}

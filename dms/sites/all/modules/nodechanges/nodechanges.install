@@ -1,0 +1,169 @@
+<?php
+
+/**
+ * Implements hook_field_schema
+ */
+function nodechanges_field_schema() {
+  return array(
+    'columns' => array(
+      'nid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'description' => 'The {node}.nid (node ID) that was changed.',
+      ),
+      'vid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'description' => 'The {node}.vid (revision ID) created when the node was changed.',
+      ),
+      'field_name' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'The machine name of the field changed in a given revision.',
+      ),
+      'old_value' => array(
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => TRUE,
+        'description' => 'The old value of the given field.',
+      ),
+      'new_value' => array(
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => TRUE,
+        'description' => 'The new value of the given field.',
+      ),
+    ),
+    'foreign keys' => array(
+      'nid' => array(
+        'table' => 'node',
+        'columns' => array('nid' => 'nid'),
+      ),
+      'vid' => array(
+        'table' => 'node',
+        'columns' => array('vid' => 'vid'),
+      ),
+    ),
+  );
+}
+
+/**
+ * Add nid & vid to field schema, if using SQL storage.
+ */
+function nodechanges_update_7001() {
+  foreach (field_read_fields() as $field) {
+    if ($field['type'] === 'nodechanges_revision_diff' && $field['storage']['type'] === 'field_sql_storage') {
+      $storage = field_sql_storage_field_storage_details($field);
+      foreach ($storage['sql'] as $table_group) {
+        foreach ($table_group as $table => $columns) {
+          // Add nid and vid columns.
+          db_add_field($table, $columns['nid'], array(
+            'type' => 'int',
+            'unsigned' => TRUE,
+            'not null' => TRUE,
+            'default' => 0,
+            'description' => 'The {node}.nid (node ID) that was changed.',
+          ));
+          db_add_field($table, $columns['vid'], array(
+            'type' => 'int',
+            'unsigned' => TRUE,
+            'not null' => TRUE,
+            'default' => 0,
+            'description' => 'The {node}.vid (revision ID) created when the node was changed.',
+          ));
+
+          // Backfill data
+          $query = db_select($table, 't');
+          $query->join('comment', 'c', 'c.cid = t.entity_id');
+          $query->join('node', 'n', 'n.nid = c.nid');
+          $result = $query->fields('t', array('entity_id'))
+            ->fields('n', array('nid', 'vid'))
+            ->distinct()
+            ->execute();
+          foreach ($result as $record) {
+            db_update($table)
+              ->condition('entity_id', $record->entity_id)
+              ->fields(array(
+                $columns['nid'] => $record->nid,
+                $columns['vid'] => $record->vid,
+              ))
+              ->execute();
+          }
+        }
+      }
+
+      // Update foreign keys.
+      field_update_field($field);
+    }
+  }
+}
+
+/**
+ * Widen value field storage.
+ */
+function nodechanges_update_7002() {
+  foreach (field_read_fields() as $field) {
+    if ($field['type'] === 'nodechanges_revision_diff' && $field['storage']['type'] === 'field_sql_storage') {
+      $storage = field_sql_storage_field_storage_details($field);
+      foreach ($storage['sql'] as $table_group) {
+        foreach ($table_group as $table => $columns) {
+          db_change_field($table, $columns['old_value'], $columns['old_value'], array(
+            'type' => 'text',
+            'size' => 'big',
+            'not null' => TRUE,
+            'description' => 'The old value of the given field.',
+          ));
+          db_change_field($table, $columns['new_value'], $columns['new_value'], array(
+            'type' => 'text',
+            'size' => 'big',
+            'not null' => TRUE,
+            'description' => 'The new value of the given field.',
+          ));
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Converts show_hide_display field formatter setting to files_display_mode.
+ */
+function nodechanges_update_7003() {
+  // Select nodechages field instances.
+  $query = db_select('field_config_instance', 'fci', array('fetch' => PDO::FETCH_ASSOC));
+  $query->join('field_config', 'fc', 'fc.id = fci.field_id');
+  $query->fields('fci');
+  $query->condition('fc.type', 'nodechanges_revision_diff');
+  $results = $query->execute();
+
+  // Find the ones that use the date_text widget.
+  foreach ($results as $record) {
+    $instance_data = unserialize($record['data']);
+    if (!empty($instance_data['display'])) {
+      $needs_update = FALSE;
+      foreach ($instance_data['display'] as $view_mode => $display) {
+        if (!empty($display['settings']['show_hide_display']) && $display['settings']['show_hide_display'] == 'fieldset') {
+          $needs_update = TRUE;
+          unset($instance_data['display'][$view_mode]['settings']['show_hide_display']);
+          $instance_data['display'][$view_mode]['settings']['files_display_mode'] = 'fieldset_all_but_new';
+        }
+      }
+      if ($needs_update) {
+        db_update('field_config_instance')
+          ->fields(array(
+            'data' => serialize($instance_data),
+          ))
+          ->condition('field_name', $record['field_name'])
+          ->condition('entity_type', $record['entity_type'])
+          ->condition('bundle', $record['bundle'])
+          ->execute();
+      }
+    }
+  }
+  field_cache_clear();
+  drupal_set_message(t('Nodechanges comment fields displays have been updated to use the new setting name.'));
+}

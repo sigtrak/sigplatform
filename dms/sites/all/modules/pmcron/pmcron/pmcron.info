@@ -1,0 +1,21 @@
+name = Error submitter CRON
+description = "Module to allow users to submit json file for error reporting."
+core = 7.x
+package = Project Management
+
+files[] = pm.test
+files[] = pmjson_process.inc
+
+dependencies[] = date
+dependencies[] = entityreference
+dependencies[] = list
+dependencies[] = views
+dependencies[] = addressfield
+dependencies[] = email
+dependencies[] = link
+
+; Information added by Drupal.org packaging script on 2014-12-02
+version = "7.x-2.0"
+core = "7.x"
+project = "pm"
+datestamp = "1417535328"

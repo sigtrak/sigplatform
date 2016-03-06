@@ -1,0 +1,160 @@
+<?php
+define('MAX_FILE_SIZE', variable_get('json_max_upload', 10));
+
+/**
+ * Implements hook_menu().
+ */
+function pmcron_menu() {
+	$items = array();
+	$items['pm/errors/cron'] = array(
+   'title' => 'Error submission by Cron',
+   'description' => 'Error submission through run Cron',
+   'page callback' => 'drupal_get_form',
+   'page arguments' => array('pmcron_cron'),
+   'type' => MENU_NORMAL_ITEM,
+   'access arguments' => array('Project Management: access administration pages'),
+   );
+	return $items;
+}
+
+/**
+ * Implements hook_cron() && To prepare upload file list
+ */
+function pmcron_cron() {
+
+		$dir = 'sites/default/files/jsoncron';
+	
+		$resDir = pmcron_getdircontents($dir);
+		
+		foreach($resDir as $file){
+			if(strtolower(substr($file,'-5')) === '.json'){	
+				$content = drupal_json_decode(file_get_contents($file));
+			    $fileConts[] = $content;
+			    $fileNames[] = $file;
+			}	
+		}
+		
+		$fileConts = array_filter($fileConts);
+		$fileNames = array_filter($fileNames);
+		
+		if(!empty($fileConts) && !empty($fileNames))
+			pmcron_add_data_bulk($fileConts, $fileNames);
+}
+
+/**
+ * Prepare files list from the directory and to avoid empty directories
+ */
+function pmcron_getdircontents($dir, &$results = array()){
+	
+    $files = scandir($dir);
+
+    foreach($files as $key => $value){
+        $path = realpath($dir.DIRECTORY_SEPARATOR.$value);
+        if(!is_dir($path)) {
+            $results[] = $path;
+        } else if(is_dir($path) && $value != "." && $value != "..") {
+            pmcron_getdircontents($path, $results);
+            $results[] = $path;
+        }
+    }
+
+    return $results;
+}
+
+/**
+ * To remove empty directories from the base directory on spcified location(/sites/default/files/jsoncron/) 
+ */
+function pmcron_delemptysubfolders($path) {
+	
+  $empty=true;
+  foreach (glob($path.DIRECTORY_SEPARATOR."*") as $file)
+  {
+     $empty &= is_dir($file) && pmcron_delemptysubfolders($file);
+  }
+  
+  return $empty && rmdir($path);
+  
+}
+
+/**
+ * Delete a file.
+ *
+ * @param $file_name A string containing a file path.
+ * @return TRUE for success, FALSE for failure.
+ */
+function pmcron_delete($file_name) {
+	
+  if(isset($file_name)){
+  	$del_dir = 'sites/default/files/jsoncron/';
+  	
+	foreach($file_name as $file):
+	  if(is_file($file)) {
+	  	@chmod($file,0777);
+	    @unlink($file);
+	  }
+	  
+	endforeach;  
+  }
+  
+  pmcron_delemptysubfolders($del_dir);
+  
+  return true;
+}
+
+
+/**
+ * Insert process in table node.
+ */
+function pmcron_add_data($data, &$node) {	
+  $skip_fields = array('title');
+  
+  foreach($data as $field_name => $field_value) {	
+    if (in_array($field_name, $skip_fields)) {
+      $node->{$field_name}= $field_value;
+    }
+    else {
+      $node->{$field_name}[LANGUAGE_NONE][0]['value'] = $field_value;
+    }
+  }
+  
+  node_save($node);
+}
+
+/** 
+ * File processing
+ */
+function pmcron_add_data_bulk($data_src, $file_name){
+  global $user;
+  $errors = array();
+  $total = 0;
+  $processed = 0;
+  
+  foreach( $data_src as $ref => $data) {
+    try {
+      $node = new stdClass();
+      $node->type = 'pmticket';
+      node_object_prepare($node);
+      $node->uid = $user->uid;
+      pmcron_add_data($data, $node);
+      if (!empty($node->nid)) {
+        $processed++;
+      }
+    } catch(Exception $e) {
+      $errors[] = $e->getMessage(). ' in file '. $file_name[$ref];
+      // Exception to be handled
+    }
+    $total++;
+  }
+  
+  # To delete error submitted files
+  pmcron_delete($file_name);
+ 
+  
+  if ($total <= $processed && $total) {
+    drupal_set_message($processed.' out of '. $total. ' Errors submitted. ');
+  }
+  if (!empty($errors)) {
+    drupal_set_message(implode('<br>', $errors),'error');
+  }
+  
+}

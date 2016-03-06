@@ -1,0 +1,178 @@
+<?php
+define('MAX_FILE_SIZE', variable_get('json_max_upload', 10));
+
+/**
+ * Implements hook_menu().
+ */
+function pmjson_menu() {
+	$items = array();
+	$items['pm/errors/upload'] = array(
+		'title' => 'Error submission',
+   'description' => 'Error submission through json upload',
+   'page callback' => 'drupal_get_form',
+   'page arguments' => array('pmjson_form'),
+   'type' => MENU_NORMAL_ITEM,
+   'access arguments' => array('Project Management: access administration pages'),
+   );
+	return $items;
+}
+
+/**
+ * Form to upload contents.
+ */
+function pmjson_form($form, &$form_state) {
+  $form['is_json_url'] = array(
+    '#type' => 'checkbox',
+    '#title' => 'Use json from url',
+    );
+  $form['json_file'] = array(
+    '#type' => 'managed_file',
+    '#title' => t('Json file'),
+    '#description' => t('Allowed extensions: json'),
+    '#upload_location' => 'public://json',
+    '#upload_validators' => array(
+     'file_validate_extensions' => array('json'),
+			// Pass the maximum file size in bytes
+     'file_validate_size' => array(MAX_FILE_SIZE*1024*1024),
+     ),
+    '#states' =>  array(
+      'invisible' => array(
+       'input[name=is_json_url]' => array('checked' => TRUE),
+
+       )
+      ),
+
+    );
+
+  $form['json_url'] = array(
+    '#type' => 'textfield',
+    '#title' => 'Json Url',
+    '#description' => 'Specify the relative path for sites/default/files',
+    '#states' =>  array(
+     'visible' => array(
+      'input[name=is_json_url]' => array('checked' => TRUE),
+
+      )
+
+     ),
+    );
+
+  $form['pm']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => 'Submit Error'
+    );
+
+  return $form;
+}
+
+function pmjson_form_submit(&$form, &$form_state) {
+  $form_values = $form_state['values'];
+  if ($form_values['is_json_url']) {
+    $data = pmjson_process_url_path($form_values['json_url']);
+  }
+  else {
+    $data = pmjson_process_file_by_fid($form_values['json_file']);
+  }
+}
+
+function pmjson_process_file_by_fid($fid) {
+   global $user;
+  $file = file_load($fid);
+  $filepath = drupal_realpath($file->uri);
+  if (!$filepath) {
+    return;
+  }
+  $content = file_get_contents($file->uri);
+  $data = drupal_json_decode($content);
+  $node = new stdClass();
+  $node->type = 'pmticket';
+  node_object_prepare($node);
+  $node->uid = $user->uid;
+  pmjson_add_data($data, $node);
+  if (!empty($node->nid)) {
+    drupal_set_message(t('Error submitted.'));
+  }
+  else {
+    drupal_set_message(t('There was an error processing the file.'), 'error');
+  }
+}
+
+function pmjson_process_url($url) {
+  $request = drupal_http_request($url);
+  return drupal_json_decode($request->data);
+}
+function pmjson_process_url_path($url) {
+  $files = file_scan_directory('public://'.$url,'/(\.\.?|json)$/', array('min_depth'=>0));
+  foreach($files as $file):
+    $content = drupal_json_decode(file_get_contents($file->uri));
+    $files_src[] = $content;
+    $files_name[] = $file->filename;
+
+  endforeach;
+  pmjson_add_data_bulk($files_src, $files_name);
+}
+
+
+function pmjson_add_data($data, &$node) {
+  $skip_fields = array('title');
+  foreach( $data as $field_name => $field_value) {
+    if (in_array($field_name, $skip_fields)) {
+      $node->{$field_name}= $field_value;
+    }
+    else {
+      $node->{$field_name}[LANGUAGE_NONE][0]['value'] = $field_value;
+    }
+  }
+  node_save($node);
+}
+
+function pmjson_add_data_bulk($data_src, $file_name) {
+  global $user;
+  $errors = array();
+  $total = 0;
+  $processed = 0;
+  foreach( $data_src as $ref => $data) {
+    try {
+      $node = new stdClass();
+      $node->type = 'pmticket';
+      node_object_prepare($node);
+      $node->uid = $user->uid;
+      pmjson_add_data($data, $node);
+      if (!empty($node->nid)) {
+        $processed++;
+      }
+    } catch(Exception $e) {
+      $errors[] = $e->getMessage(). ' in file '. $file_name[$ref];
+      // Exception to be handled
+    }
+    $total++;
+  }
+  if ($total <= $processed && $total) {
+    drupal_set_message($processed.' out of '. $total. ' Errors submitted. ');
+  }
+  if (!empty($errors)) {
+    drupal_set_message(implode('<br>', $errors),'error');
+  }
+}
+
+
+/**
+ * Implements hook_pm_dashboard_links().
+ */
+function pmjson_pm_dashboard_links($type) {
+  $links = array();
+  if ($type == 'page' || $type == 'block') {
+    $links[] = array(
+      'theme' => 'pm_dashboard_link',
+      'title' => t('Error Submission'),
+      'icon' => 'pmtickets',
+      'path' => 'pm/errors/upload',
+      'params' => array(),
+      'node_type' => 'pmjson',
+      'add_type' => 'pmjson',
+      'map' => array(),
+      'weight' => 9,
+    );
+  }
+  return $links;
+}
