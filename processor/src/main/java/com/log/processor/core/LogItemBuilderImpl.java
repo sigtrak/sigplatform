@@ -49,7 +49,8 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 		for (String line : list) {
 			if ( line.contains(CommonUtils.ERROR) ) {
 				if (errorStr.equals("")) {
-					errorStr = line;
+					line = line.startsWith("#") ? line.substring(1) : line;
+					errorStr = line.trim();
 				}
 			}
 			if ( line.contains(CommonUtils.PASSED) ) {
@@ -60,7 +61,8 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 			} else if  ( line.contains(CommonUtils.FAILED) ) {
 				item.setTestResult(CommonUtils.FAILED);
 				if ( errorStr.equals("")) {
-					item.setTestError( line );
+					line = line.startsWith("#") ? line.substring(1) : line;
+					item.setTestError( line.trim() );
 				} else {
 					item.setTestError(errorStr);
 				}
@@ -68,7 +70,8 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 				break;
 			} else if  ( line.contains(CommonUtils.TERMINATED) ) {
 				item.setTestResult(CommonUtils.TERMINATED);
-				item.setTestError( line );
+				line = line.startsWith("#") ? line.substring(1) : line;
+				item.setTestError( line.trim() );
 				lineStr = line;
 				break;
 			}
