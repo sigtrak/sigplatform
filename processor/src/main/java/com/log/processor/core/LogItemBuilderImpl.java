@@ -115,7 +115,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 			item.setTestSimulationTime( Long.parseLong(simTimeStr) );
 		}
 		Date date = new Date(file.lastModified());
-		DateFormat format = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
+		DateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         format.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
         String formatted = format.format(date);
 		item.setTimeSimulationCompleted( formatted );
