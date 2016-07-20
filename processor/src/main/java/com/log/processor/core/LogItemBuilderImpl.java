@@ -103,7 +103,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 		}
 		item.setTestDirectory( parent );
 		Date parentDate = new Date(parentFile.lastModified());
-		DateFormat parentFormat = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
+		DateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         parentFormat.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
         String parentFormatted = parentFormat.format(parentDate);
         item.setTestDirectoryDate(parentFormatted);
