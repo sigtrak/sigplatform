@@ -86,7 +86,9 @@ public class S3LogFileProcessor extends AbstractLogProcessor implements Runnable
 						LogItem logItem = builder.buildLogItem(s3Api, s3, bucketName, key);
 						if(logItem != null) {
 							// log.info("Parent directory: {}", file.getParent());
-							// writer.writeLogItem( logItem, file.getParent(), file.getName() );
+							writer.writeLogItem(s3Api, s3, bucketName, key, logItem);
+							String newKey = key + ".DONE";
+							s3Api.renameFile(s3, bucketName, key, newKey);
 							// moveFile(file);
 						}
 					} catch(Exception ex) {

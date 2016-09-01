@@ -234,6 +234,7 @@ public class S3Api {
 	  * @param bucketName : folder name.
 	  * @param key : old file name.
 	  * @param newKey : new file name.
+	  * @param s3 : AmazonS3 object.
 	  * @return true on successful renaming the file, otherwise.
 	  *
 	  */
@@ -242,7 +243,7 @@ public class S3Api {
 		try {
 			CopyObjectRequest copyObjRequest = new CopyObjectRequest(bucketName, key, bucketName, newKey);
 			s3.copyObject(copyObjRequest);
-			s3.deleteObject(new DeleteObjectRequest(bucketName, key));	
+			s3.deleteObject(new DeleteObjectRequest(bucketName, key));
 			return true;
 		} catch(Exception ex) {
 			ex.printStackTrace();
