@@ -10,12 +10,12 @@ import io.dropwizard.lifecycle.Managed;
 public class LogProcessorManager implements Managed {
 
 	private ExecutorService executor;
-	private List<LogFileProcessor> readers;
+	private List<AbstractLogProcessor> readers;
 	
 	@Inject
 	public LogProcessorManager(
 			ExecutorService executor, 
-			List<LogFileProcessor> readers) {
+			List<AbstractLogProcessor> readers) {
 		this.executor = executor;
 		this.readers = readers;
 	}
@@ -29,5 +29,4 @@ public class LogProcessorManager implements Managed {
 	public void stop() throws Exception {
 		executor.shutdown();
 	}
-
 }

@@ -16,7 +16,7 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.TrueFileFilter;
 import org.slf4j.Logger;
 
-public class LogFileProcessor implements Runnable {
+public class LogFileProcessor extends AbstractLogProcessor {
 	private static final Logger log = getLogger(LogFileProcessor.class);
 	private String directory;
 	private LogItemBuilder builder;
@@ -43,26 +43,27 @@ public class LogFileProcessor implements Runnable {
 	}
 
 	public void process() {
-		File dir = new File(directory);
-		FilenameFilter filter = new FilenameFilter() {
-		    public boolean accept(File dir, String name) {
-		        return name.endsWith(CommonUtils.DOT_LOG);
-		    }
-		};
 		try {
+			File dir = new File(directory);
+			FilenameFilter filter = new FilenameFilter() {
+			    public boolean accept(File dir, String name) {
+			        return name.endsWith(CommonUtils.DOT_LOG);
+			    }
+			};
 			//log.info("Getting all files in " + dir.getCanonicalPath() + " including those in subdirectories");
 			List<File> files = (List<File>) FileUtils.listFiles(dir, TrueFileFilter.INSTANCE, TrueFileFilter.INSTANCE);
 			for (File file : files) {
 				if (file.getName().endsWith(CommonUtils.DOT_LOG)) {
-					System.out.println("file: " + file.getCanonicalPath());
+					System.out.println("===========file: ========" + file.getParent());
 					LogItem logItem = builder.buildLogItem( file );
 					log.info("Parent directory: {}", file.getParent());
 					writer.writeLogItem( logItem, file.getParent(), file.getName() );
 					moveFile(file);
 				}
 			}
-		} catch(IOException e) {
+		} catch(Exception e) {
 			log.error("Exception when traversing files. Exeption={}", e);
+			e.printStackTrace();
 		}
 	}
 	
@@ -74,5 +75,4 @@ public class LogFileProcessor implements Runnable {
 			log.error("Exception when moving file to .DONE. File={}, Exeption={}",file.getName(), e);
 		}
 	}
-	
 }

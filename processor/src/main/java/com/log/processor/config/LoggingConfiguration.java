@@ -1,4 +1,3 @@
-
 package com.log.processor.config;
 
 import lombok.Data;

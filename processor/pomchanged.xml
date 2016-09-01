@@ -160,11 +160,39 @@
        		<version>1.10.19</version>
        		<scope>test</scope>
        	</dependency>
+
+        <!-- Added by Sankar
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-java-sdk</artifactId>
+            <version>1.9.6</version>
+        </dependency>
+        Added by Sankar -->
     </dependencies>
     
     <build>
+      
         <plugins>
+          <!-- Added by Sankar 
+           <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>1.2.1</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>java</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <mainClass>com.amazonaws.samples.S3Sample</mainClass>
+                </configuration>
+            </plugin>
 			<plugin>
+
+      Added by Sankar -->
+
 			    <groupId>org.apache.maven.plugins</groupId>
 			    <artifactId>maven-shade-plugin</artifactId>
 			    <version>2.3</version>

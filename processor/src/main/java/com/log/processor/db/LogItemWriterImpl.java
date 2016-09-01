@@ -19,6 +19,9 @@ import com.log.processor.core.LogItem;
 import com.mongodb.DB;
 import com.mongodb.MongoException;
 
+import com.amazonaws.services.s3.AmazonS3;
+import com.log.processor.core.S3Api;
+
 public class LogItemWriterImpl implements LogItemWriter {
 	private static final Logger log = getLogger(LogItemWriterImpl.class);
 	private LogItemReader reader;
@@ -33,8 +36,14 @@ public class LogItemWriterImpl implements LogItemWriter {
 	@Override
 	public void writeLogItem(LogItem item, String directory, String name) {
 		JacksonDBCollection<LogItem,String> collection = CommonUtils.getCollection(db);
-		insert(collection, item);
+		// insert(collection, item);
 		createFileUsingJackson(item, directory, name);
+	}
+
+	public void writeLogItem(LogItem item, S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
+		JacksonDBCollection<LogItem,String> collection = CommonUtils.getCollection(db);
+		// insert(collection, item);
+		createFileUsingJackson(item, s3Api, s3, bucketName, key);
 	}
 	
 	public void createFileUsingGson(LogItem item, String directory, String name) {
@@ -54,6 +63,25 @@ public class LogItemWriterImpl implements LogItemWriter {
 			log.error("Gson Error writing json file for the item={}", e);
 		}
 	}
+
+	public void createFileUsingJackson(LogItem item, S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
+		ObjectMapper mapper = new ObjectMapper();
+		System.out.println("Bucket Name is : " + bucketName);
+		System.out.println("Key is : " + key);
+		String name = key;
+		key = key.substring(key.lastIndexOf("/"));
+		if (name.indexOf(".") > 0) {
+		    name = name.substring(name.lastIndexOf("/"), name.lastIndexOf("."));
+		} else {
+			return;
+		}
+		try {
+			String jsonInString = mapper.writeValueAsString(item);
+			s3Api.uploadObject(s3, bucketName, key, name, jsonInString);
+		} catch (Exception e) {
+			log.error("Jackson Error writing json file for the item={}", e);
+		}
+	}
 	
 	public void createFileUsingJackson(LogItem item, String directory, String name) {
 		ObjectMapper mapper = new ObjectMapper();
@@ -65,6 +93,7 @@ public class LogItemWriterImpl implements LogItemWriter {
 		}
 		try {
 			String fileName = directory+"/"+name;
+			System.out.println("File Name is : " + fileName);
 			log.info("FileName {}", fileName);
 			mapper.writeValue(new File(fileName), item);
 			//String jsonInString = mapper.writeValueAsString(item);

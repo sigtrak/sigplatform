@@ -16,12 +16,12 @@ job:
   numJobs: 1
 
 file:
-  directory: None
-  # name: .log
+  directory: /home/dinesh/Documents/newregressions
+  name: .log
 
 s3:
-  bucket: newregressions
-  # key: log-processor/dev
+  bucket: sigtrak-artifacts
+  key: log-processor/dev
 
 logging:
   level: INFO

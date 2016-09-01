@@ -18,6 +18,8 @@ import com.google.inject.name.Named;
 import com.google.inject.name.Names;
 import com.log.processor.config.LogProcessorConfiguration;
 import com.log.processor.core.LogFileProcessor;
+import com.log.processor.core.S3LogFileProcessor;
+import com.log.processor.core.AbstractLogProcessor;
 import com.log.processor.core.LogItemBuilder;
 import com.log.processor.core.LogItemBuilderImpl;
 import com.log.processor.core.LogProcessorManager;
@@ -44,12 +46,15 @@ public class LogProcessorModule extends AbstractModule {
 	public LogProcessorModule(LogProcessorConfiguration c, Environment e) {
 		this.configuration = c;
 		this.environment = e;
+		System.out.println("control here - 1");
 	}
 	
 	@Override
 	protected void configure() {
 		bind(String.class).annotatedWith(Names.named("directory"))
 			.toInstance(configuration.getFileConfiguration().getDirectory());
+		bind(String.class).annotatedWith(Names.named("bucket"))
+			.toInstance(configuration.getS3Configuration().getBucket());
 		bind(Integer.class).annotatedWith(Names.named("numJobs"))
 	    	.toInstance(configuration.getJobConfiguration().getNumJobs());
 		bind(String.class).annotatedWith(Names.named("url"))
@@ -62,7 +67,7 @@ public class LogProcessorModule extends AbstractModule {
 		bind(LogItemReader.class).to(LogItemReaderImpl.class);
 		bind(LogItemWriter.class).to(LogItemWriterImpl.class);
 		bind(LogItemBuilder.class).to(LogItemBuilderImpl.class);
-		bind(LogFileProcessor.class);
+		bind(AbstractLogProcessor.class).to(LogFileProcessor.class);
 	}
 	
 	@Provides
@@ -73,11 +78,16 @@ public class LogProcessorModule extends AbstractModule {
 	
 	@Provides
 	@Inject
-	private List<LogFileProcessor> buildLogFileProcessors(
+	private List<AbstractLogProcessor> buildLogFileProcessors(
 			@Named("numJobs") int numJobs, Injector injector ) {
-		List<LogFileProcessor> readers = new ArrayList<>();
-		for (int job=0; job < numJobs; job++) {
-			readers.add( injector.getInstance(LogFileProcessor.class) );
+
+		List<AbstractLogProcessor> readers = new ArrayList<>();
+		if(!(configuration.getFileConfiguration().getDirectory().equals("None"))) {
+			for (int job=0; job < numJobs; job++) {
+				readers.add( injector.getInstance(LogFileProcessor.class) );
+			}
+		} else {
+			readers.add( injector.getInstance(S3LogFileProcessor.class));
 		}
 		return readers;
 	}
@@ -85,7 +95,8 @@ public class LogProcessorModule extends AbstractModule {
 	@Provides
 	@Singleton
 	@Inject
-	private LogProcessorManager buildLogProcessorManager(ExecutorService executor, List<LogFileProcessor> readers) {
+	private LogProcessorManager buildLogProcessorManager(ExecutorService executor, List<AbstractLogProcessor> readers) {
+		System.out.println("control here - 5");
 		try {
 			return new LogProcessorManager(executor, readers);
 		} catch (Exception e) {

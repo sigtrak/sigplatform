@@ -1,3 +1,8 @@
+/**
+*	Modified by Sankar, for Drupal, 
+*	Added new fields :: Regression, Regression Date and 
+*	Error Category
+*/
 package com.log.processor.core;
 import java.util.Date;
 
@@ -39,7 +44,36 @@ public class LogItem {
 	Integer testSeed;
 	@JsonProperty("field_build_seed")
 	Integer buildSeed;
+
+	/* Modified by Sankar	*/
+	@JsonProperty("field_test_error_category")
+	String testErrorCategory;
+	@JsonProperty("field_test_regression")
+	String testRegression;
+	@JsonProperty("field_test_regression_date")
+	String testRegressionDate;
 	
+	public void setTestRegression(String testRegression) {
+		this.testRegression = testRegression;
+	}
+	public String getTestRegression() {
+		return this.testRegression;
+	}
+	public void setTestRegressionDate(String testRegressionDate) {
+		this.testRegressionDate = testRegressionDate;
+	}
+	public String getTestRegressionDate() {
+		return this.testRegressionDate;
+	}
+	public void setTestErrorCategory(String testErrorCategory) {
+		this.testErrorCategory = testErrorCategory;
+	}
+	public String getTestErrorCategory() {
+		return this.testErrorCategory;
+	}
+
+	/* Upto here.	*/
+
 	public String getId() {
 		return id;
 	}
