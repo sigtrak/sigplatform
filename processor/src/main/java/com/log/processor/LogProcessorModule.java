@@ -42,13 +42,12 @@ public class LogProcessorModule extends AbstractModule {
 	private static final Logger log = getLogger(LogProcessorApplication.class);
 	private LogProcessorConfiguration configuration;
 	private Environment environment;
-	
+
 	public LogProcessorModule(LogProcessorConfiguration c, Environment e) {
 		this.configuration = c;
 		this.environment = e;
-		System.out.println("control here - 1");
 	}
-	
+
 	@Override
 	protected void configure() {
 		bind(String.class).annotatedWith(Names.named("directory"))
@@ -69,13 +68,13 @@ public class LogProcessorModule extends AbstractModule {
 		bind(LogItemBuilder.class).to(LogItemBuilderImpl.class);
 		bind(AbstractLogProcessor.class).to(LogFileProcessor.class);
 	}
-	
+
 	@Provides
 	@Inject
 	private ExecutorService buildExecutor() {
 		return Executors.newCachedThreadPool();
 	}
-	
+
 	@Provides
 	@Inject
 	private List<AbstractLogProcessor> buildLogFileProcessors(
@@ -91,12 +90,11 @@ public class LogProcessorModule extends AbstractModule {
 		}
 		return readers;
 	}
-	
+
 	@Provides
 	@Singleton
 	@Inject
 	private LogProcessorManager buildLogProcessorManager(ExecutorService executor, List<AbstractLogProcessor> readers) {
-		System.out.println("control here - 5");
 		try {
 			return new LogProcessorManager(executor, readers);
 		} catch (Exception e) {

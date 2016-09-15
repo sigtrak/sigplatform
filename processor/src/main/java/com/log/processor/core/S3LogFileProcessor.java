@@ -34,38 +34,40 @@ import com.amazonaws.services.s3.model.CopyObjectRequest;
 import com.amazonaws.services.s3.model.DeleteObjectRequest;
 
 public class S3LogFileProcessor extends AbstractLogProcessor implements Runnable {
-	private static final Logger log = getLogger(LogFileProcessor.class);
-	private String bucketName;
+	private static final Logger log = getLogger(S3LogFileProcessor.class);
+	private LogItemWriter writer;
 	private LogItemBuilder builder;
+	private String bucketName;
 	private AmazonS3 s3;
 	private S3Api s3Api;
 
 	@Inject
-	public S3LogFileProcessor(String bucketName, LogItemBuilder builder ) {
+	public S3LogFileProcessor( @Named("bucket")  String bucketName, S3LogItemBuilderImpl builder, LogItemWriter writer  ) {
 		this.bucketName = bucketName;
 		this.builder = builder;
+		this.writer = writer;
 		try {
 			this.s3Api = new S3Api();
 			this.s3 = s3Api.getConnection();
 		} catch (AmazonServiceException ase) {
-			System.out.println("Caught an AmazonServiceException, which means your request made it "
+			log.error("Caught an AmazonServiceException, which means your request made it "
 			+ "to Amazon S3, but was rejected with an error response for some reason.");
-			System.out.println("Error Message:    " + ase.getMessage());
-			System.out.println("HTTP Status Code: " + ase.getStatusCode());
-			System.out.println("AWS Error Code:   " + ase.getErrorCode());
-			System.out.println("Error Type:       " + ase.getErrorType());
-			System.out.println("Request ID:       " + ase.getRequestId());
+			log.error("Error Message:    " + ase.getMessage());
+			log.error("HTTP Status Code: " + ase.getStatusCode());
+			log.error("AWS Error Code:   " + ase.getErrorCode());
+			log.error("Error Type:       " + ase.getErrorType());
+			log.error("Request ID:       " + ase.getRequestId());
 		} catch (AmazonClientException ace) {
-			System.out.println("Caught an AmazonClientException, which means the client encountered "
+			log.error("Caught an AmazonClientException, which means the client encountered "
 			+ "a serious internal problem while trying to communicate with S3, "
 			+ "such as not being able to access the network.");
-			System.out.println("Error Message: " + ace.getMessage());
+			log.error("Error Message: " + ace.getMessage());
 		}
 	}
 
 	@Override
 	public void run() {
-		log.info("Entered LogFileProcessor...");
+		log.info("Entered S3LogFileProcessor...");
 		while(true) {
 			try {
 				process();
@@ -79,32 +81,25 @@ public class S3LogFileProcessor extends AbstractLogProcessor implements Runnable
 	public void process() {
 		List<S3ObjectSummary> objectListing = new S3Api().getObjectsFromBucket(s3, bucketName);
 		if(objectListing != null) {
+			log.info("In Process  Here 1");
 			for (S3ObjectSummary objectSummary : objectListing) {
 				if(objectSummary.getKey().endsWith(".log")) {
 					try {
+						log.info("In process : Here 2");
+				log.info("************");
 						String key = objectSummary.getKey();
 						LogItem logItem = builder.buildLogItem(s3Api, s3, bucketName, key);
 						if(logItem != null) {
-							// log.info("Parent directory: {}", file.getParent());
-							writer.writeLogItem(s3Api, s3, bucketName, key, logItem);
+							log.info("Key is : ", key);
+							writer.writeLogItem(logItem, s3Api, s3, bucketName, key);
 							String newKey = key + ".DONE";
 							s3Api.renameFile(s3, bucketName, key, newKey);
-							// moveFile(file);
 						}
 					} catch(Exception ex) {
 						ex.printStackTrace();
 					}
 				}
 			}
-		}
-		System.out.println();
-	}
-	private void moveFile(File file) {
-		try {
-			File newFile = new File(file.getCanonicalFile()+".DONE");
-			com.google.common.io.Files.move(file, newFile);
-		} catch ( IOException e) {
-			log.error("Exception when moving file to .DONE. File={}, Exeption={}",file.getName(), e);
 		}
 	}
 }
