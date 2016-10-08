@@ -16,12 +16,12 @@ job:
   numJobs: 1
 
 file:
-  directory: None
+  directory: /home/dinesh/Documents/sigplatform-master/processor/newregressions
   # name: .log
 
 s3:
   bucket: newregressions
-  # key: log-processor/dev
+  key: log-processor/dev
 
 logging:
   level: INFO

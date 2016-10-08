@@ -14,8 +14,8 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.util.stream.Collectors;
 
-import org.slf4j.Logger;
 import static org.slf4j.LoggerFactory.getLogger;
+import org.slf4j.Logger;
 
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.AmazonServiceException;
@@ -152,4 +152,3 @@ public class S3Api {
       		return objectSummary.substring(objectSummary.lastIndexOf("/")+1);
    	}
 }
-

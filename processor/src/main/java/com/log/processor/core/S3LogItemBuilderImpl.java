@@ -11,14 +11,13 @@ import java.util.List;
 import java.util.TimeZone;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
-import java.lang.Exception;
-
+import java.io.IOException;
 import org.slf4j.Logger;
 import com.log.processor.common.CommonUtils;
 
 public class S3LogItemBuilderImpl implements LogItemBuilder {
 	private static final Logger log = getLogger(LogItemBuilderImpl.class);
-
+	
 	@Override
 	public LogItem buildLogItem(File logFile) {
 		return null;
@@ -28,7 +27,6 @@ public class S3LogItemBuilderImpl implements LogItemBuilder {
 	public LogItem buildLogItem(S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
 		LogItem item = null;
 		try {
-			log.info("In S# LogItemBuilderImpl " + key);
 			List<String> list = s3Api.downloadObject(s3, bucketName, key);
 			item = new LogItem();
 			String lineStr = readResultLine(list,item);

@@ -34,7 +34,7 @@ import com.amazonaws.services.s3.model.CopyObjectRequest;
 import com.amazonaws.services.s3.model.DeleteObjectRequest;
 
 public class S3LogFileProcessor extends AbstractLogProcessor implements Runnable {
-	private static final Logger log = getLogger(S3LogFileProcessor.class);
+	private static final Logger log = getLogger(LogFileProcessor.class);
 	private LogItemWriter writer;
 	private LogItemBuilder builder;
 	private String bucketName;
@@ -81,12 +81,9 @@ public class S3LogFileProcessor extends AbstractLogProcessor implements Runnable
 	public void process() {
 		List<S3ObjectSummary> objectListing = new S3Api().getObjectsFromBucket(s3, bucketName);
 		if(objectListing != null) {
-			log.info("In Process  Here 1");
 			for (S3ObjectSummary objectSummary : objectListing) {
 				if(objectSummary.getKey().endsWith(".log")) {
 					try {
-						log.info("In process : Here 2");
-				log.info("************");
 						String key = objectSummary.getKey();
 						LogItem logItem = builder.buildLogItem(s3Api, s3, bucketName, key);
 						if(logItem != null) {

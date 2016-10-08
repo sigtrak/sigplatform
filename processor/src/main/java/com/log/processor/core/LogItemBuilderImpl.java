@@ -1,7 +1,7 @@
 package com.log.processor.core;
 
-import org.slf4j.Logger;
 import static org.slf4j.LoggerFactory.getLogger;
+import org.slf4j.Logger;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -15,16 +15,16 @@ import java.util.Date;
 import java.util.List;
 import java.util.TimeZone;
 import java.util.stream.Collectors;
-
 import com.amazonaws.services.s3.AmazonS3;
+
 import com.log.processor.common.CommonUtils;
 
 public class LogItemBuilderImpl implements LogItemBuilder {
 	private static final Logger log = getLogger(LogItemBuilderImpl.class);
-
+	
 	@Override
 	public LogItem buildLogItem(File file) {
-		log.info("Entered buildLogItem");
+		System.out.println("Entered buildLogItem");
 		if (!file.exists() ) {
 			log.error("File object does not exist. Can not build log item.");
 		}
@@ -37,7 +37,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 
 	@Override
 	public LogItem buildLogItem(S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
-		return null;
+		return null;		
 	}
 
 	private List<String> buildLines(File file) {
@@ -71,6 +71,17 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 					line = line.startsWith("#") ? line.substring(1) : line;
 					item.setTestError( line.trim() );
 				} else {
+					//	Added by Sankar.
+					String str[] = errorStr.substring((errorStr.lastIndexOf("]")+1)).trim().split(" ");
+					StringBuffer sb = new StringBuffer();
+					for(int i=0; i<str.length; i++)
+						if(!str[i].matches("-?[0-9A-Fa-f]+"))
+							sb.append(str[i] + " ");
+						else
+							sb.append("N ");
+
+					item.setTestErrorCategory(sb.toString().trim());
+					log.info(sb.toString().trim());
 					item.setTestError(errorStr);
 				}
 				lineStr = line;
@@ -102,13 +113,14 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 		}
 		if ( idx != -1 ) {
 			testDir = dirs[idx];
-			String[] testElements = testDir.split("_");
+			String[] testElements = testDir.split("_");	
 			project = testElements[0] + "_" + testElements[1];
 			item.setTestProject( project );
 			item.setTestModule( testElements[2] );
 			item.setTestRelease( testElements[3] );
 			item.setTestRegression(testDir+"/"+dirs[dirs.length-1]);
 		}
+
 		item.setTestDirectory( parent );
 		Date parentDate = new Date(parentFile.lastModified());
 		DateFormat parentFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
@@ -117,6 +129,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
         item.setTestDirectoryDate(parentFormatted);
         //	Added by Sankar
         item.setTestRegressionDate(parentFormatted);
+        
 		int lIdx = lineStr.indexOf("[");
 		int rIdx = lineStr.indexOf("]");
 		if ( lIdx >=0 && rIdx >= 0 ) {
