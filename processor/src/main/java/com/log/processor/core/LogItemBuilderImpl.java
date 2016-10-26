@@ -123,6 +123,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 
 		item.setTestDirectory( parent );
 		Date parentDate = new Date(parentFile.lastModified());
+		// Changed the date format from dd/MM/yyyy to yyyy-MM-dd
 		DateFormat parentFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         parentFormat.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
         String parentFormatted = parentFormat.format(parentDate);
@@ -137,6 +138,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 			item.setTestSimulationTime( Long.parseLong(simTimeStr) );
 		}
 		Date date = new Date(file.lastModified());
+		// Changed the date format from dd/MM/yyyy to yyyy-MM-dd
 		DateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         format.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
         String formatted = format.format(date);
