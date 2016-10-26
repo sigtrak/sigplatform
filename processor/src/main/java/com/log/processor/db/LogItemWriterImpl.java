@@ -19,31 +19,41 @@ import com.log.processor.core.LogItem;
 import com.mongodb.DB;
 import com.mongodb.MongoException;
 
+import com.amazonaws.services.s3.AmazonS3;
+import com.log.processor.core.S3Api;
+
 public class LogItemWriterImpl implements LogItemWriter {
 	private static final Logger log = getLogger(LogItemWriterImpl.class);
 	private LogItemReader reader;
 	private DB db;
-	
+
 	@Inject
 	public LogItemWriterImpl( DB db, LogItemReader reader ) {
 		this.db = db;
 		this.reader = reader;
 	}
-	
+
 	@Override
 	public void writeLogItem(LogItem item, String directory, String name) {
 		JacksonDBCollection<LogItem,String> collection = CommonUtils.getCollection(db);
-		insert(collection, item);
+		// insert(collection, item);
 		createFileUsingJackson(item, directory, name);
 	}
-	
+
+	@Override
+	public void writeLogItem(LogItem item, S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
+		JacksonDBCollection<LogItem,String> collection = CommonUtils.getCollection(db);
+		// insert(collection, item);
+		createFileUsingJackson(item, s3Api, s3, bucketName, key);
+	}
+
 	public void createFileUsingGson(LogItem item, String directory, String name) {
 		Gson gson = new GsonBuilder().excludeFieldsWithoutExposeAnnotation().create();
 		String json = gson.toJson(item);
 		if (name.indexOf(".") > 0) {
 		    name = name.substring(0, name.lastIndexOf("."));
 			name = name + ".json";
-		} else { 
+		} else {
 			return;
 		}
 		try {
@@ -54,7 +64,23 @@ public class LogItemWriterImpl implements LogItemWriter {
 			log.error("Gson Error writing json file for the item={}", e);
 		}
 	}
-	
+
+	public void createFileUsingJackson(LogItem item, S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
+		ObjectMapper mapper = new ObjectMapper();
+		key = key.substring(0, key.lastIndexOf("."));
+		if (key.indexOf(".") > 0) {
+			key = key + ".json";
+		} else {
+			return;
+		}
+		try {
+			String jsonInString = mapper.writeValueAsString(item);
+			s3Api.uploadObject(s3, bucketName, key, jsonInString);
+		} catch (Exception e) {
+			log.error("Jackson Error writing json file for the item={}", e);
+		}
+	}
+
 	public void createFileUsingJackson(LogItem item, String directory, String name) {
 		ObjectMapper mapper = new ObjectMapper();
 		if (name.indexOf(".") > 0) {
@@ -65,6 +91,7 @@ public class LogItemWriterImpl implements LogItemWriter {
 		}
 		try {
 			String fileName = directory+"/"+name;
+			System.out.println("File Name is : " + fileName);
 			log.info("FileName {}", fileName);
 			mapper.writeValue(new File(fileName), item);
 			//String jsonInString = mapper.writeValueAsString(item);

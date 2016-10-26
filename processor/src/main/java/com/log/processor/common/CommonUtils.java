@@ -16,7 +16,11 @@ public class CommonUtils {
 	public static final String TERMINATED = "TERMINATED";
 	public static final String REGRESS = "regress";
 	public static final String PCIXP = "pcixp";
-	
+	public static final String UNDERSCORE = "_";
+	public static final String FORWARDSLASH = "/";
+	public static final String SIMPLEDATEFORMAT = "yyyy-MM-dd HH:mm:ss";
+	public static final String TIMEZONEFORMAT = "Etc/UTC";
+
 	public static JacksonDBCollection<LogItem,String> getCollection(DB db) {
 		DBCollection dbCol = db.getCollection( TEST_LOG );
 		return JacksonDBCollection.wrap(dbCol, LogItem.class, String.class);

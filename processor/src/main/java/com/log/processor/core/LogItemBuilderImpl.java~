@@ -1,7 +1,6 @@
 package com.log.processor.core;
 
 import static org.slf4j.LoggerFactory.getLogger;
-import org.slf4j.Logger;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -15,7 +14,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.TimeZone;
 import java.util.stream.Collectors;
-import com.amazonaws.services.s3.AmazonS3;
+
+import org.slf4j.Logger;
 
 import com.log.processor.common.CommonUtils;
 
@@ -25,7 +25,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 	@Override
 	public LogItem buildLogItem(File file) {
 		System.out.println("Entered buildLogItem");
-		if (!file.exists() ) {
+		if ( !file.exists() ) {
 			log.error("File object does not exist. Can not build log item.");
 		}
 		LogItem item = new LogItem();
@@ -34,12 +34,6 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 		buildLogItemAttributes(file, lineStr, item);
 		return item;
 	}
-
-	@Override
-	public LogItem buildLogItem(S3Api s3Api, AmazonS3 s3, String bucketName, String key) {
-		return null;		
-	}
-
 	private List<String> buildLines(File file) {
 		List<String> list = new ArrayList<>();
 		try(BufferedReader br = Files.newBufferedReader( Paths.get(file.getCanonicalPath())) ) {
@@ -49,7 +43,6 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 		}
 		return list;
 	}
-
 	private String readResultLine(List<String> list, LogItem item) {
 		String lineStr = "";
 		String errorStr = "";
@@ -71,17 +64,6 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 					line = line.startsWith("#") ? line.substring(1) : line;
 					item.setTestError( line.trim() );
 				} else {
-					//	Added by Sankar.
-					String str[] = errorStr.substring((errorStr.lastIndexOf("]")+1)).trim().split(" ");
-					StringBuffer sb = new StringBuffer();
-					for(int i=0; i<str.length; i++)
-						if(!str[i].matches("-?[0-9A-Fa-f]+"))
-							sb.append(str[i] + " ");
-						else
-							sb.append("N ");
-
-					item.setTestErrorCategory(sb.toString().trim());
-					log.info(sb.toString().trim());
 					item.setTestError(errorStr);
 				}
 				lineStr = line;
@@ -96,7 +78,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 		}
 		return lineStr;
 	}
-
+	
 	private void buildLogItemAttributes(File file, String lineStr, LogItem item) {
 		String parent = file.getParent();
 		File parentFile = file.getParentFile();
@@ -118,17 +100,17 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 			item.setTestProject( project );
 			item.setTestModule( testElements[2] );
 			item.setTestRelease( testElements[3] );
-			item.setTestRegression(testDir+"/"+dirs[dirs.length-1]);
 		}
-
 		item.setTestDirectory( parent );
 		Date parentDate = new Date(parentFile.lastModified());
-		DateFormat parentFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+		/*
+			Date format has been changed according to the Drupal Configuration...
+			Modified by Siva Sankar.
+		*/
+		DateFormat parentFormat = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
         parentFormat.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
         String parentFormatted = parentFormat.format(parentDate);
         item.setTestDirectoryDate(parentFormatted);
-        //	Added by Sankar
-        item.setTestRegressionDate(parentFormatted);
         
 		int lIdx = lineStr.indexOf("[");
 		int rIdx = lineStr.indexOf("]");
@@ -137,7 +119,7 @@ public class LogItemBuilderImpl implements LogItemBuilder {
 			item.setTestSimulationTime( Long.parseLong(simTimeStr) );
 		}
 		Date date = new Date(file.lastModified());
-		DateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+		DateFormat format = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
         format.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
         String formatted = format.format(date);
 		item.setTimeSimulationCompleted( formatted );
